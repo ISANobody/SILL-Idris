@@ -138,6 +138,20 @@ data RTEq_ : Vect n (RegularTree l,RegularTree l)
 RTEq : RegularTree l -> RegularTree l -> Type
 RTEq s t = RTEq_ [] s t
 
+RTEq_case : (DecEq t) => {t:Type} -> {l:t->Nat} -> {x:RegularTree l} -> {y:RegularTree l}
+         -> (Elem (x,y) hyp -> b)
+         -> (RTEq_ hyp (unfold x) y -> b)
+         -> (RTEq_ hyp x (unfold y) -> b)
+         -> (  {c:t} 
+            -> {ss:Vect (l c) (RegularTree l)} 
+            -> {ts:Vect (l c) (RegularTree l)}
+            -> All (uncurry (RTEq_ ((Connect c ss,Connect c ts)::hyp))) (zip ss ts) -> b)
+         -> (RTEq_ hyp x y -> b)
+RTEq_case f _ _ _ (Assumpt p) = f p
+RTEq_case _ f _ _ (RTEqMuL p) = f p
+RTEq_case _ _ f _ (RTEqMuR p) = f p
+RTEq_case _ _ _ f (RTEqCon p) = f p
+
 exampleEq1 : (RTEq exampleType1 exampleType1)
 exampleEq1 = RTEqCon Nil
 
