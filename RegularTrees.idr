@@ -1,6 +1,7 @@
 module RegularTrees
 import Data.Vect
 import Data.Fin
+import Data.Vect.Quantifiers as Q
 
 %default total
 
@@ -130,8 +131,7 @@ data RTEq_ : Vect n (RegularTree l,RegularTree l)
   Assumpt : Elem (s,t) hyp -> RTEq_ hyp s t
   RTEqMuL : RTEq_ hyp (unfold (Mu s)) t -> RTEq_ hyp (Mu s) t
   RTEqMuR : RTEq_ hyp s (unfold (Mu t)) -> RTEq_ hyp s (Mu t)
-  RTEqCon : (Elem (s,t) (zip ss ts) 
-         -> RTEq_ ((Connect c ss,Connect c ts)::hyp) s t)
+  RTEqCon : All (uncurry (RTEq_ ((Connect c ss,Connect c ts)::hyp))) (zip ss ts)
          -> RTEq_ {l=l} hyp (Connect c ss) (Connect c ts)
 
 -- Define a wrapper for starting out with no hypotheses
@@ -139,12 +139,42 @@ RTEq : RegularTree l -> RegularTree l -> Type
 RTEq s t = RTEq_ [] s t
 
 exampleEq1 : (RTEq exampleType1 exampleType1)
-exampleEq1 = RTEqCon (\i => void (noEmptyElem{x=(Var,Var)} i))
+exampleEq1 = RTEqCon Nil
 
-isRTEq1 : (hyp:Vect n (RegularTree l,RegularTree l))
+isRTEq0 : (DecEq t) => {l:t->Nat} -> (hyp:Vect n (RegularTree l,RegularTree l)) -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ hyp x y)
+isRTEq1 : (DecEq t) => {l:t->Nat}
+       -> (hyp:Vect n (RegularTree l,RegularTree l))
        -> {p:Not (Elem (x,y) hyp)}
        -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ hyp x y)
+isRTEq0_ : (DecEq t) => {l:t->Nat} -> (hyp:Vect n (RegularTree l,RegularTree l))
+       -> (z:(RegularTree l,RegularTree l)) -> Dec (uncurry (RTEq_ hyp) z)
 
-isRTEq0 : (hyp:Vect n (RegularTree l,RegularTree l)) -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ hyp x y)
-isRTEq0 {l=l} hyp x y with (isElem (x,y) hyp)
-  isRTEq0 hyp x y | with_pat = ?isRTEq0_rhs
+isRTEq0 hyp x y with (isElem (x,y) hyp)
+  isRTEq0 hyp x y | (Yes prf) = Yes (Assumpt prf)
+  isRTEq0 hyp x y | (No contra) = assert_total (isRTEq1 {p=contra} hyp x y)
+
+isRTEq0_ hyp (x,y) = isRTEq0 hyp x y
+
+
+-- A better version wouldn't need this Var case
+isRTEq1 hyp (Mu x) y with (isRTEq0 hyp (unfold (Mu x)) y)
+  isRTEq1 hyp (Mu x) y | (Yes prf) = Yes (RTEqMuL prf)
+  isRTEq1 hyp (Mu x) y | (No contra) = No believe_me
+isRTEq1 hyp x (Mu y) with (isRTEq0 hyp x (unfold (Mu y)))
+  isRTEq1 hyp x (Mu y) | (Yes prf) = Yes (RTEqMuR prf)
+  isRTEq1 hyp x (Mu y) | (No contra) = No believe_me
+isRTEq1 hyp (Connect c cs) (Connect d ds) with (decEq c d)
+  isRTEq1 hyp (Connect c cs) (Connect c ds) | (Yes Refl) 
+  with (Q.all{P=(uncurry (RTEq_ ((Connect c cs,Connect c ds)::hyp)))}
+              (isRTEq0_ ((Connect c cs, Connect c ds) :: hyp))
+              (zip cs ds))
+    isRTEq1 hyp (Connect c cs) (Connect c ds) | (Yes Refl) | (Yes prf) 
+    = Yes (RTEqCon prf)
+    isRTEq1 hyp (Connect c cs) (Connect c ds) | (Yes Refl) | (No contra) 
+    = No believe_me
+  isRTEq1 hyp (Connect c cs) (Connect d ds) | (No contra) = No believe_me
+isRTEq1 _ _ _ = No believe_me
+
+isRTEq : (DecEq t) => {l:t->Nat} 
+      -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ [] x y)
+isRTEq = isRTEq0 []
