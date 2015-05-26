@@ -14,6 +14,9 @@ data PrimTy = I
 instance DecEq PrimTy where
   decEq I I = Yes Refl
 
+-- This makes me wonder if this would work better in Haskell with
+-- -XEverythingOn. I think we could just add arbitary type equality constraints
+-- there and let the solver deal with it.
 total primTyInterp : PrimTy -> Type
 primTyInterp I = Int
 
