@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs, DataKinds, KindSignatures, TypeFamilies, TypeOperators #-}
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, PolyKinds, UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS -Wall #-}
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Unsafe.Coerce
@@ -58,7 +59,7 @@ data Session where
   SendD :: a -> Session -> Session
   One :: Session
   External :: Session -> Session -> Session
-  Internal :: Session -> Session -> Session
+  Internal :: [Session] -> Session
 
 -- TODO Add a wellformedness checker that ensures types are
 -- 1) Contractive and w/o consecutive Mu's
@@ -114,6 +115,7 @@ data Process :: [Session] -> Session -> * where
         -> (a -> Process (Update n t env) s) -> Process env s
   Forward :: (RTEq t s ~ True) => Process ('[t]) s
   Bind :: Process '[] t -> Process (t ': env) s -> Process env s
+  TailBind :: (RTEq t s ~ True) => Process '[] t -> Process '[] s
   Lift :: IO () -> Process env s -> Process env s
   ExternalR :: (Unfold t ~ External s1 s2)
             => Process env s1 -> Process env s2 -> Process env t
@@ -124,42 +126,109 @@ data Process :: [Session] -> Session -> * where
                 ,Unfold (Index n env) ~ External s1 s2)
             => SNat n -> Process (Update n s2 env) t -> Process env t
 
+instance Show (Process env s) where
+  show Close = "Close"
+  show Forward = "Forward"
+  show (Lift _ p) = "Lift ("++show p++")"
+  show (Bind p1 p2) = "Bind ("++show p1++") ("++show p2++")"
+  show (ExternalR p1 p2) = "External ("++show p1++") ("++show p2++")"
+  show (SendDR _ p) = "SendDR ("++show p++")"
+  show (RecvDL _ _) = "RecvDL (???)"
+  show (Wait _ p) = "Wait ("++show p++")"
+  show (ExternalL1 _ p) = "E1 ("++show p++")"
+  show (ExternalL2 _ p) = "E2 ("++show p++")"
+
 data Comms where
   COne :: Comms
   CData :: a -> Comms
-  CChoice :: Bool -> Comms
+  CChoice1 :: Comms
+  CChoice2 :: Comms
 
-type MyChan = (Chan Comms,Chan Comms)
+data TaggedChan a = Recv (Chan a) | Send (Chan a)
+
+taggedRead :: TaggedChan a -> IO a
+taggedRead (Recv c) = readChan c
+taggedWrite :: TaggedChan a -> a -> IO ()
+taggedWrite (Send c) x = writeChan c x
+taggedNew :: IO (TaggedChan a,TaggedChan a)
+taggedNew = do ch <- newChan
+               return (Recv ch,Send ch)
+
+type MyChan = (TaggedChan Comms,TaggedChan Comms)
+
+
 
 interp :: Process '[] One -> IO ()
-interp pin = do selfr <- newChan
-                selfw <- newChan
-	        go [] (selfr,selfw) pin
+interp pin = do (r,w) <- taggedNew
+	        forkIO (go [] (undefined,w) pin)
+		yield
+		COne <- taggedRead r
+		return ()
   where go :: [MyChan] -> (MyChan) -> Process env s -> IO ()
-        go env (_,sw) Close = writeChan sw COne
-	go env self (Wait n p) = do let (r,w) = index (fromSing n) env
-	                            COne <- readChan r
+        go [(r,w)] (sr,sw) Forward = let f :: TaggedChan Comms 
+	                                   -> TaggedChan Comms -> IO ()
+	                                 f r' w' = do putStrLn "f"
+					              yield
+					              x <- taggedRead r'
+				                      taggedWrite w' x
+					              case x of
+						        COne -> return ()
+					     	        _ -> f r' w'
+				     in do putStrLn "Forward"
+				           _ <- forkIO (f w sr)
+				           f sw r
+	go _ _ Forward = error "Forward Bug"
+        go _ (_,sw) Close = do putStrLn "Close"
+	                       taggedWrite sw COne
+	go env self (Wait n p) = do putStrLn "Wait"
+	                            let (r,_) = index (fromSing n) env
+	                            COne <- taggedRead r
+				    putStrLn "Wait'"
 	                            go env self p
-        go env (sr,sw) (SendDR x p) = do writeChan sw (CData x)
+        go env (sr,sw) (SendDR x p) = do tid <- myThreadId
+	                                 putStrLn ("SendDR "++show tid)
+	                                 taggedWrite sw (CData x)
 	                                 go env (sr,sw) p
-	go env self (RecvDL n f) = do let (r,w) = index (fromSing n) env
-	                              (CData x) <- readChan r
+	go env self (RecvDL n f) = do tid <- myThreadId
+	                              putStrLn ("RecvDL "++show tid)
+	                              let (r,_) = index (fromSing n) env
+	                              (CData x) <- taggedRead r
+				      putStrLn "RecvDL'"
 	                              go env self (f (unsafeCoerce x))
-	go env self (Bind p1 p2) = do sr <- newChan
-	                              sw <- newChan
-	                              forkIO (go [] (sr,sw) p1)
-	                              go ((sw,sr):env) self p2
-        go env self (Lift io p) = do io
+	go env self (Bind p1 p2) = do tid <- myThreadId
+	                              putStrLn ("Bind "++show tid)
+	                              (ar,aw) <- taggedNew
+	                              (br,bw) <- taggedNew
+				      putStrLn ("Bind' "++show tid)
+	                              forkIO (do tid' <- myThreadId
+				                 putStrLn ("From "++show tid
+						          ++" to "++show tid')
+						 yield
+				                 go [] (br,aw) p1)
+				      putStrLn ("Bind'' "++show tid)
+				      yield
+	                              go ((ar,bw):env) self p2
+	go env self (TailBind p) = do go env self p
+        go env self (Lift io p) = do putStrLn "Lift"
+	                             io
 	                             go env self p
-	go env (sr,sw) (ExternalR p1 p2) = do CChoice b <- readChan sr
-	                                      if b
-					      then go env (sr,sw) p1
-					      else go env (sr,sw) p2
-	go env self (ExternalL1 n p) = do let (r,w) = index (fromSing n) env
-	                                  writeChan w (CChoice True)
+	go env (sr,sw) (ExternalR p1 p2) = do tid <- myThreadId
+	                                      putStrLn ("ExternalR "++show tid)
+	                                      c <- taggedRead sr
+					      putStrLn "ExternalR'"
+	                                      case c of
+					        CChoice1 -> go env (sr,sw) p1
+					        CChoice2 -> go env (sr,sw) p2
+	go env self (ExternalL1 n p) = do putStrLn "External1"
+	                                  let (_,w) = index (fromSing n) env
+	                                  taggedWrite w CChoice1
+					  putStrLn "External1'"
 					  go env self p
-	go env self (ExternalL2 n p) = do let (r,w) = index (fromSing n) env
-	                                  writeChan w (CChoice False)
+	go env self (ExternalL2 n p) = do tid <- myThreadId 
+	                                  putStrLn ("External2 "++show tid)
+	                                  let (_,w) = index (fromSing n) env
+	                                  taggedWrite w CChoice2
+					  putStrLn "External2'"
 				          go env self p
 
 t1 :: Process '[] (Mu One)
@@ -175,7 +244,7 @@ t3 :: Process '[] (SendD Float (SendD Int One))
 t3 = SendDR 5 (SendDR 6 Close)
 
 t4 :: Process '[] (SendD Float (SendD Int One))
-t4 = SendDR 5.7 (SendDR 8 Close)
+t4 = Bind t3 Forward
 
 t5 :: Process '[SendD Int One] (SendD String One)
 t5 = RecvDL SZ (\i -> SendDR (show i) (Wait SZ Close))
@@ -189,10 +258,13 @@ t7 = interp (Bind t4 (RecvDL SZ (\f -> RecvDL SZ (\i -> Lift (print f) (Lift (pr
 type Stream a = Mu (External One (SendD a Var))
 
 countup :: Nat -> Process '[] (Stream Nat)
-countup n = Lift (print n) (ExternalR Close (SendDR n (Bind (countup (S n)) Forward)))
+countup n = (ExternalR Close (SendDR n (countup (S n))))
+
+countup' :: Nat -> Process '[] (Stream Nat)
+countup' _ = (ExternalR Close (SendDR Z (ExternalR Close (SendDR (S Z) (ExternalR Close (SendDR (S (S Z)) undefined))))))
 
 main :: IO ()
 main = interp (Bind (countup Z)
-		(ExternalL2 SZ (RecvDL SZ (\i -> Lift (print "rec")
-		(ExternalL2 SZ (RecvDL SZ (\i -> Lift (print "rec")
+                (ExternalL2 SZ (RecvDL SZ (\i -> Lift (print i) 
+                (ExternalL2 SZ (RecvDL SZ (\i2 -> Lift (print i2) 
 		(ExternalL1 SZ (Wait SZ Close)))))))))
