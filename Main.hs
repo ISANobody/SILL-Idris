@@ -5,6 +5,7 @@
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Unsafe.Coerce
+import Data.List
 import Data.Singletons
 import Data.Singletons.TH
 import Data.Singletons.Prelude.Base
@@ -34,6 +35,10 @@ promote [d|
   update Z x (_:ys) = x:ys
   update (S k) x (y:ys) = y:(update k x ys)
 
+  update0 :: Nat -> [a] -> a -> [a]
+  update0 Z (_:ys) x = x:ys
+  update0 (S k) (y:ys) x = y:(update0 k ys x)
+
   asmem :: (Eq k) => k -> [(k,v)] -> Bool
   asmem _ [] = False
   asmem x ((k,_):ys) = if x == k then True else asmem x ys
@@ -48,47 +53,60 @@ promote [d|
   assub :: (Eq k) => [(k,v)] -> [(k,v')] -> Bool
   assub [] _ = True
   assub ((x,_):xs) ys= if asmem x ys then assub xs ys else False
+
+  all2 :: (a -> b -> Bool) -> [a] -> [b] -> Bool
+  all2 f xs ys = and (zipWith f xs ys)
+
+  mapf :: (a -> b -> c) -> b -> [a] -> [c]
+  mapf _ _ [] = []
+  mapf f z (x:xs) = (f x z):(mapf f z xs)
+
+  mapf0 :: Nat -> [a] -> b -> ([a] -> b -> c) -> [a] -> [c]
+  mapf0 n a z f xs = mapf f z (map (update0 n a) xs)
   |]
 
+-- TODO split modules to allow for OverloadedLists here
+data HList :: [*] -> * where
+  HNil :: HList '[]
+  HCons :: a -> (HList ts) -> HList (a ': ts)
 
+hindex :: SNat n -> HList ts -> Index n ts
+hindex SZ (HCons x _) = x
+hindex (SS k) (HCons _ xs) = hindex k xs
 
 -- Tracking whether this is open or closed makes this type unpromotable
 -- Choice is over Nat b/c String is unpromotable
-data Session where
-  Mu :: Session -> Session
-  Var :: Session
-  SendD :: a -> Session -> Session
-  One :: Session
-  External :: Session -> Session -> Session
-  Internal :: [Session] -> Session
+promote [d|
+  data Session where
+    Mu :: Session -> Session
+    Var :: Session
+    SendD :: a -> Session -> Session
+    One :: Session
+    External :: [Session] -> Session
+    Internal :: [Session] -> Session
+  
+  subst :: Session -> Session -> Session
+  subst _ One = One
+  subst _ (Mu x) = Mu x
+  subst x Var = x
+  subst x (SendD a s) = SendD a (subst x s)
+  subst x (External cs) = External (map (subst x) cs)
+  subst x (Internal cs) = Internal (map (subst x) cs)
+
+  unfold :: Session -> Session
+  unfold (Mu x) = subst (Mu x) x
+  unfold One = One
+  unfold Var = Var
+  unfold (SendD a s) = SendD a s
+  unfold (Internal cs) = (Internal cs)
+  unfold (External cs) = (External cs)
+
+  |]
 
 -- TODO Add a wellformedness checker that ensures types are
 -- 1) Contractive and w/o consecutive Mu's
 -- 2) Closed
 -- 3) Choices have no duplicates
-
-type family  SynEq (s::Session) (t::Session) :: Bool
-type instance SynEq One One = True
-type instance SynEq One (SendD b t) = False
-type instance SynEq One Var = False
-type instance SynEq One (Mu t) = False
-type instance SynEq (SendD a s) One = False
-type instance SynEq (SendD a s) (SendD a t) = SynEq s t
-type instance SynEq (SendD a s) Var = False
-type instance SynEq (SendD a s) (Mu t) = False
-
-type family Subst (s::Session) (t::Session) :: Session
-type instance Subst x Var = x
-type instance Subst x (Mu y) = Mu y
-type instance Subst x One = One
-type instance Subst x (SendD a s) = (SendD a (Subst x s))
-type instance Subst x (External s1 s2) = External (Subst x s1) (Subst x s2)
-
-type family Unfold (s::Session) :: Session
-type instance Unfold (Mu x) = Subst (Mu x) x
-type instance Unfold (SendD a s) = SendD a s
-type instance Unfold One = One
-type instance Unfold (External s1 s2) = External s1 s2
 
 -- TODO actually do circular coinduction
 type family RTEq (s::Session) (t::Session) :: Bool
@@ -98,7 +116,7 @@ type instance RTEq (Mu x) (Mu y) = RTEq (Unfold (Mu x)) (Unfold (Mu y))
 type instance RTEq One (Mu y) = RTEq One (Unfold (Mu y))
 type instance RTEq One One = True
 type instance RTEq (SendD a s) (SendD a t) = RTEq s t
-type instance RTEq (External s1 s2) (External t1 t2) = RTEq s1 t1 :&& RTEq s2 t2
+type instance RTEq (External cs) (External ds) = All2 (TyCon2 RTEq) cs ds
 
 -- Thanks to Mu's we might always have a syntactic mismatch between the declared
 -- type of a process's channel and the most natural way to write these types. As
@@ -118,34 +136,27 @@ data Process :: [Session] -> Session -> * where
   Bind :: Process '[] t -> Process (t ': env) s -> Process env s
   TailBind :: (RTEq t s ~ True) => Process '[] t -> Process '[] s
   Lift :: IO () -> Process env s -> Process env s
-  ExternalR :: (Unfold t ~ External s1 s2)
-            => Process env s1 -> Process env s2 -> Process env t
-  ExternalL1 :: (Inbounds n env ~ True
-                ,Unfold (Index n env) ~ External s1 s2)
-            => SNat n -> Process (Update n s1 env) t -> Process env t
-  ExternalL2 :: (Inbounds n env ~ True
-                ,Unfold (Index n env) ~ External s1 s2)
-            => SNat n -> Process (Update n s2 env) t -> Process env t
-  InternalR :: (Unfold t ~ Internal i)
-            => (Map (TyCon1 (Process env)) i) -> Process env t
-
-instance Show (Process env s) where
-  show Close = "Close"
-  show Forward = "Forward"
-  show (Lift _ p) = "Lift ("++show p++")"
-  show (Bind p1 p2) = "Bind ("++show p1++") ("++show p2++")"
-  show (ExternalR p1 p2) = "External ("++show p1++") ("++show p2++")"
-  show (SendDR _ p) = "SendDR ("++show p++")"
-  show (RecvDL _ _) = "RecvDL (???)"
-  show (Wait _ p) = "Wait ("++show p++")"
-  show (ExternalL1 _ p) = "E1 ("++show p++")"
-  show (ExternalL2 _ p) = "E2 ("++show p++")"
+  ExternalR :: (Unfold t ~ External choices
+               ,ps ~ Map (TyCon1 (Process env)) choices)
+            => HList ps -> Process env t
+  ExternalL :: (Inbounds n env ~ True
+               ,Inbounds c choices ~ True
+               ,Unfold (Index n env) ~ External choices)
+            => SNat n -> SNat c -> Process (Update n (Index c choices) env) t
+            -> Process env t
+  InternalR :: (Unfold t ~ Internal choices
+               ,Inbounds n choices ~ True
+	       ,Index n choices ~ s)
+            =>  SNat n -> Process env s -> Process env t
+  InternalL :: (Inbounds n env ~ True
+               ,Unfold (Index n env) ~ Internal choices
+	       ,ps ~ (Mapf0 n env s (TyCon2 Process) choices))
+            => SNat n -> HList ps -> Process env s
 
 data Comms where
   COne :: Comms
   CData :: a -> Comms
-  CChoice1 :: Comms
-  CChoice2 :: Comms
+  CChoice :: SNat n -> Comms
 
 data TaggedChan a = Recv (Chan a) | Send (Chan a)
 type MyChan = (TaggedChan Comms,TaggedChan Comms)
@@ -174,14 +185,17 @@ interp pin = do tid <- myThreadId
 		COne <- taggedRead (r,w')
 		return ()
   where go :: [MyChan] -> (MyChan) -> Process env s -> IO ()
-        go [envch] self Forward = 
-	   let f (Recv r) (Send w) = do x <- readChan r
-	                                writeChan w x
-					f (Recv r) (Send w)
-	   in do forkFinally (f (fst self) (snd envch)) myfin
-	         forkFinally (f (fst envch) (snd self)) myfin
+        go envch self Forward = 
+	   let f o (Recv r) (Send w) = do x <- readChan r
+	                                  writeChan w x
+					  case x of
+					    COne -> do killThread o
+					               return ()
+					    _ -> f o (Recv r) (Send w)
+	   in do tid1 <- myThreadId
+	         tid2 <- forkFinally (f tid1 (fst self) (snd (head envch))) myfin
+	         (f tid2 (fst (head envch)) (snd self))
 		 return ()
-	go _ _ Forward = error "Forward Bug"
         go _ self Close = taggedWrite self COne
 	go env self (Wait n p) = do COne <- taggedRead (index (fromSing n) env)
 	                            go env self p
@@ -206,16 +220,17 @@ interp pin = do tid <- myThreadId
 	                              go ((ar,bw):env) self p2
 	go env self (TailBind p) = go env self p
         go env self (Lift io p) = io >> go env self p
-	go env self (ExternalR p1 p2) = do c <- taggedRead self
-	                                   case c of
-					     CChoice1 -> go env self p1
-					     CChoice2 -> go env self p2
-	go env self (ExternalL1 n p) = 
-	   do taggedWrite (index (fromSing n) env) CChoice1
+	go env self (ExternalR ps) = do CChoice n <- taggedRead self
+	                                go env self (unsafeCoerce (hindex n ps))
+	go env self (ExternalL n k p) = 
+	   do taggedWrite (index (fromSing n) env) (CChoice k)
 	      go env self p
-	go env self (ExternalL2 n p) = 
-	   do taggedWrite (index (fromSing n) env) CChoice2
+        go env self (InternalR k p) =  
+	   do taggedWrite self (CChoice k)
 	      go env self p
+	go env self (InternalL n ps) =
+	   do CChoice n <- taggedRead (index (fromSing n) env)
+	      go env self (unsafeCoerce (hindex n ps))
 
 t1 :: Process '[] (Mu One)
 t1 = Close
@@ -241,20 +256,50 @@ t6 = SendDR "foo" (Bind t6 Forward)
 t7 :: IO ()
 t7 = interp (Bind t4 (RecvDL SZ (\f -> RecvDL SZ (\i -> Lift (print f) (Lift (print i) (Wait SZ Close))))))
 
-t8 :: Process '[] (Internal [One,One])
-t8 = InternalR [Close,Close]
+--t8 :: Process '[] (Internal [One,One])
+--t8 = InternalR (HCons Close (HCons Close HNil))
 
-type Stream a = Mu (External One (SendD a Var))
+type Stream a = Mu (External [One,SendD a Var])
+type IStream a = Mu (Internal [One,SendD a Var])
 
 -- Works
 countup :: Nat -> Process '[] (Stream Nat)
-countup n = (ExternalR Close (SendDR n (countup (S n))))
+countup n = (ExternalR (HCons Close (HCons (SendDR n (countup (S n))) HNil)))
+
+countdown :: Nat -> Process '[] (IStream Nat)
+countdown Z = InternalR (SS SZ) (SendDR Z (InternalR SZ Close))
+countdown (S k) = InternalR (SS SZ) (SendDR (S k) (countdown k))
 
 -- Fails
-countup' :: Nat -> Process '[] (Stream Nat)
+{-countup' :: Nat -> Process '[] (Stream Nat)
 countup' n = (ExternalR Close (SendDR n (TailBind (countup' (S n)))))
+-}
+
+-- Works
+{-countup'' :: Nat -> Process '[] (Stream Nat)
+countup'' n = (ExternalR Close (SendDR n 
+              (ExternalR Close (SendDR (S n) (countup'' (S (S n)))))))
+	      -}
+
+-- Works
+{- countup''' :: Nat -> Process '[] (Stream Nat)
+countup''' n = (ExternalR [Close,(SendDR n 
+              (ExternalR [Close,(SendDR (S n) (TailBind (countup''' (S (S n)))))]))])-}
+
+t9 :: IO ()
+t9 = interp (Bind (countup Z)
+                (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (print i) 
+		(ExternalL SZ SZ (Wait SZ Close))))))
+
+t11 :: IO ()
+t11 = interp (Bind (countdown (S (S Z))) go)
+   where go :: Process '[IStream Nat] One
+         go = (InternalL SZ (HCons (Wait SZ Close) 
+                            (HCons (RecvDL SZ (\i -> Lift (print i) go)) HNil)))
+
+t10 :: Process '[Internal '[One]] One
+t10 = InternalL SZ (HCons (Wait SZ Close) HNil)
 
 main :: IO ()
-main = interp (Bind (countup' Z)
-                (ExternalL2 SZ (RecvDL SZ (\i -> Lift (print i) 
-		(ExternalL1 SZ (Wait SZ Close))))))
+main = interp (go 0)
+  where go n = Lift (putStrLn (show n)) (Bind (go (n+1)) Forward)
