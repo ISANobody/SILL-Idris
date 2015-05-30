@@ -108,15 +108,29 @@ promote [d|
 -- 2) Closed
 -- 3) Choices have no duplicates
 
--- TODO actually do circular coinduction
-type family RTEq (s::Session) (t::Session) :: Bool
-type instance RTEq (Mu x) One = RTEq (Unfold (Mu x)) One
-type instance RTEq (Mu x) (SendD a s) = RTEq (Unfold (Mu x)) (SendD a s)
-type instance RTEq (Mu x) (Mu y) = RTEq (Unfold (Mu x)) (Unfold (Mu y))
-type instance RTEq One (Mu y) = RTEq One (Unfold (Mu y))
-type instance RTEq One One = True
-type instance RTEq (SendD a s) (SendD a t) = RTEq s t
-type instance RTEq (External cs) (External ds) = All2 (TyCon2 RTEq) cs ds
+type family RTEq1 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
+type instance RTEq1 hyp (Mu x) One = RTEq0 hyp (Unfold (Mu x)) One
+type instance RTEq1 hyp (Mu x) (SendD a s) 
+  = RTEq0 hyp (Unfold (Mu x)) (SendD a s)
+type instance RTEq1 hyp (Mu x) (Mu y) 
+  = RTEq0 hyp (Unfold (Mu x)) (Unfold (Mu y))
+type instance RTEq1 hyp One (Mu y) = RTEq0 hyp One (Unfold (Mu y))
+type instance RTEq1 hyp One One = True
+type instance RTEq1 hyp (SendD a s) (SendD a t) 
+  = RTEq0 ('(SendD a s, SendD a t) ': hyp) s t
+type instance RTEq1 hyp (External cs) (External ds) 
+  = All2 (TyCon2 (RTEq0 ('(External cs,External ds) ': hyp))) cs ds
+
+type family RTEq0' (ctx::[(Session,Session)]) (hyp::[(Session,Session)])
+   (s::Session) (t::Session) :: Bool
+type instance RTEq0' '[] hyp s t = RTEq1 hyp s t
+type instance RTEq0' ('(a,b) ': ctx) hyp s t 
+  = If ((a :== s) :&& (b :== t)) True (RTEq1 hyp s t)
+
+type family RTEq0 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
+type instance RTEq0 hyp s t = RTEq0' hyp hyp s t
+
+type RTEq s t = RTEq0 '[] s t
 
 -- Thanks to Mu's we might always have a syntactic mismatch between the declared
 -- type of a process's channel and the most natural way to write these types. As
@@ -271,9 +285,9 @@ countdown Z = InternalR (SS SZ) (SendDR Z (InternalR SZ Close))
 countdown (S k) = InternalR (SS SZ) (SendDR (S k) (countdown k))
 
 -- Fails
-{-countup' :: Nat -> Process '[] (Stream Nat)
-countup' n = (ExternalR Close (SendDR n (TailBind (countup' (S n)))))
--}
+countup' :: Nat -> Process '[] (Stream Nat)
+countup' n = (ExternalR (HCons Close (HCons (SendDR n (TailBind (countup' (S n)))) HNil)))
+
 
 -- Works
 {-countup'' :: Nat -> Process '[] (Stream Nat)

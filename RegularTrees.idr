@@ -192,3 +192,8 @@ isRTEq1 _ _ _ = No believe_me
 isRTEq : (DecEq t) => {l:t->Nat} 
       -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ [] x y)
 isRTEq = isRTEq0 []
+
+-- TODO figure out if there is a better
+getYes : (res : Dec p) -> case res of {Yes _ => p; No _ => ()}
+getYes (Yes p) = p
+getYes (No _) = ()
