@@ -105,10 +105,16 @@ isSesEq s t = isRTEq s t
 SesEnv : (k:Nat) -> (v:Vect m Type) -> Type
 SesEnv k v = Vect k (Maybe (SessionType v))
 
+-- TODO enforce j < k
+data SubPerm : Vect j a -> Vect k a -> type where
+  Done : SubPerm [] v
+  Grab : {v:Vect k a} -> (i:Fin (S k))
+      -> SubPerm u v -> SubPerm (x::u) (insertAt i x v)
+
 -- TODO Close should enforce that everything is Consumed
 -- TODO Forward should ensure that only the forwarded channel is left
 data Process : SesEnv k v -> SessionType v -> Type where
-  Close : Process env one
+  Close : {k:Nat} -> Process (replicate k Nothing) one
   Wait  : (i:Fin k) 
        -> {auto prf:index i env = (Just one)}
        -> Process (replaceAt i Nothing env) s
@@ -137,8 +143,10 @@ data Process : SesEnv k v -> SessionType v -> Type where
   Bind : {env:SesEnv k v}
       -> {s:SessionType v} 
       -> {t:SessionType v}
-      -> (Lazy (Process [] s))
-      -> Process ((Just s)::env) t
+      -> {env':SesEnv j v}
+      -> {default Done perm:SubPerm env' env}
+      -> (Lazy (Process env' s))
+      -> Process (env++[Just s]) t
       -> Process env t
   Lift : ({[STDIO]} Eff ()) -> Process env s -> Process env s
   ExternalR : {env:SesEnv k v}
@@ -171,7 +179,8 @@ data EProc : {v:Vect k Type} -> Type where
   ESendDR : a -> EProc{v=v} -> EProc{v=v}
   ESendDL : Nat -> (a -> EProc{v=v}) -> EProc{v=v}
   ELift : ({[STDIO]} Eff ()) -> EProc{v=v} -> EProc{v=v}
-  EBind : Lazy (Process{v=v} env s) -> EProc{v=v} -> EProc{v=v}
+  EBind : {env:SesEnv k v}
+       -> Lazy (Process{v=v} env s) -> Vect k Nat -> EProc{v=v} -> EProc{v=v}
   EExternalR : Vect n (EProc{v=v}) -> EProc{v=v}
   EExternalL : Nat -> Nat -> EProc{v=v} -> EProc{v=v}
 
@@ -179,10 +188,15 @@ hVectMap : HVect (map (\x => {t:Type} -> x -> t) ts) -> HVect ts -> Vect (length
 hVectMap Nil Nil = Nil
 hVectMap (f::fs) (x::xs) = (f x) :: (hVectMap fs xs)
 
+erasePerm : {u:Vect k a} -> SubPerm u v -> Vect k Nat
+erasePerm Done = []
+erasePerm (Grab i p) = (finToNat i) :: erasePerm p
+
 eraseProc : {v:Vect k Type} -> Process{v=v} env s -> EProc{v=v}
 eraseAll : {env : SesEnv k v} -> {ss:Vect n (SessionType v)}
         -> HVect (map (Process env) ss)
         -> Vect n (EProc{v=v})
+
 eraseAll {ss=Nil} Nil = Nil
 eraseAll {ss=t::ts} (p::ps) = (eraseProc p)::(eraseAll{ss=ts} ps)
 eraseAll {ss=Nil} (p::ps) impossible
@@ -191,7 +205,7 @@ eraseAll {ss=t::ts} Nil impossible
 eraseProc Close = EClose
 eraseProc (Lift io p) = ELift io (eraseProc p)
 eraseProc {v} (Wait n p) = EWait (finToNat n) (eraseProc{v=v} p)
-eraseProc (Bind ep cp) = EBind ep (eraseProc cp)
+eraseProc (Bind{perm} ep cp) = EBind ep (erasePerm perm) (eraseProc cp)
 eraseProc (SendDR x p) = ESendDR x (eraseProc p)
 eraseProc (SendDL n cont) = ESendDL (finToNat n) (eraseProc . cont)
 eraseProc (ExternalR ps) = EExternalR (eraseAll ps)
@@ -264,6 +278,12 @@ vindex' Z (x::_) = Just x
 vindex' (S k) (_::xs) = vindex' k xs
 vindex' _ _ = Nothing
 
+remap : List a -> Vect j Nat -> List a
+remap v [] = []
+remap v (n::ns) = 
+  case index' n v of
+       Just x => x :: remap v ns
+
 -- TODO Use a state monad or something
 -- The types are loose here to try to avoid writting a peservation theorem
 step : PState v 
@@ -271,9 +291,9 @@ step : PState v
 step (env,self,ELift io p) =
   do io
      return [(env,self,p)]
-step (env,self,EBind ep cp) =
+step (env,self,EBind ep cs cp) =
   do i <- newChan
-     return [([],i,eraseProc ep),(env++[i],self,cp)]
+     return [(remap env cs,i,eraseProc ep),(env++[i],self,cp)]
 step (env,self,EClose) =
   do writeSelf self MTerm
      return []
@@ -346,7 +366,7 @@ t6 : Process{v=[Int]} [] one
 t6 = Bind t5 (SendDL 0 (\x => Lift (print x) (Wait 0 Close))) 
 
 t7 : Process{v=[Process [Just one] one]} [] (sendD 0 one)
-t7 = SendDR (Close) Close
+t7 = SendDR (Wait{env=[Just one]} 0 Close) Close
 
 -- Why is this acceptable but t8 failing?
 boom : Vect 1 Type
@@ -378,14 +398,57 @@ countUp : Nat -> Process{v=[Nat]} [] (SStream{v=[Nat]} 0)
 countUp n = ExternalR [Close,SendDR n (Bind (countUp (S n)) (Forward
                       {s=(SStream{v=[Nat]} 0)} {t=(SStream{v=[Nat]} 0)} 0))]
 
+sfilter : (Nat -> Bool) -> Process [Just (SStream{v=[Nat]} 0)]
+                                  (SStream{v=[Nat]} 0)
+sfilter p =
+  ExternalR [(ExternalL 0 0 (Wait 0 Close))
+            ,(ExternalL 0 1 (SendDL 0 (\x =>
+             if p x
+                then (SendDR x
+                     (Bind{perm=Grab 0 Done} (sfilter p) 
+                     (Forward{s=(SStream{v=[Nat]} 0)} 
+                             {t=(SStream{v=[Nat]} 0)}
+                             1)))
+                else (Bind{perm=Grab 0 Done} (sfilter p)
+                     (ExternalL 1 1 
+                     (Forward{s=(sendD{v=[Nat]} 0 (Mu (external [one,sendD 0 Var])))}
+                             {t=(sendD{v=[Nat]} 0 (Mu (external [one,sendD 0 Var])))}
+                             1))))))]
+
+sieve : Process [Just (SStream{v=[Nat]} 0)] (SStream{v=[Nat]} 0)
+sieve =
+  ExternalR [(ExternalL 0 0 (Wait 0 Close))
+            ,(ExternalL 0 1 
+             (SendDL 0 (\x =>
+             (SendDR x
+             (Bind{perm=(Grab 0 Done)} (sfilter (\n => mod n x /= 0))
+             (Bind{perm=(Grab 1 (Done{v=[Just (SStream{v=[Nat]} 0)]}))} sieve 
+             (Forward {s=(SStream{v=[Nat]} 0)}{t=(SStream{v=[Nat]} 0)}
+                     2)))))))]
+
+primes : Process [] (SStream{v=[Nat]} 0)
+primes = Bind (countUp 2)
+        (Bind{perm=Grab 0 Done} sieve
+        (Forward{s=(SStream{v=[Nat]} 0)}{t=(SStream{v=[Nat]} 0)}
+                1))
+
 t11 : Process{v=[Nat]} [] one
-t11 = Bind (countUp 0) (ExternalL 0 1 
+t11 = Bind (primes)    (ExternalL 0 1 
                        (SendDL 0 (\n => 
                         Lift (print n) 
                        (ExternalL 0 1
                        (SendDL 0 (\n => 
                         Lift (print n) 
-                       (ExternalL 0 0 Close)))))))
+                       (ExternalL 0 1
+                       (SendDL 0 (\n => 
+                        Lift (print n) 
+                       (ExternalL 0 1
+                       (SendDL 0 (\n => 
+                        Lift (print n) 
+                       (ExternalL 0 1
+                       (SendDL 0 (\n => 
+                        Lift (print n) 
+                       (ExternalL 0 0 (Wait 0 Close)))))))))))))))))
 
 main : IO ()
 main = run (interpTop{v=[Int]} t10)
