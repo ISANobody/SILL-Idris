@@ -6,6 +6,9 @@ import Data.Vect
 import Data.Vect.Quantifiers as Q
 import Data.HVect
 import System.Concurrency.Raw
+import Effects
+import Effect.State
+import Effect.StdIO
 
 total alter : (a -> a) -> Nat -> List a -> Maybe (List a)
 alter _ _ [] = Nothing
@@ -137,7 +140,7 @@ data Process : SesEnv k v -> SessionType v -> Type where
       -> (Lazy (Process [] s))
       -> Process ((Just s)::env) t
       -> Process env t
-  Lift : (Lazy (IO ())) -> Process env s -> Process env s
+  Lift : ({[STDIO]} Eff ()) -> Process env s -> Process env s
   ExternalR : {env:SesEnv k v}
            -> {t:SessionType v}
            -> {auto prf:unfold t = external{k=n} ss}
@@ -167,7 +170,7 @@ data EProc : {v:Vect k Type} -> Type where
   EForward : Nat -> EProc
   ESendDR : a -> EProc{v=v} -> EProc{v=v}
   ESendDL : Nat -> (a -> EProc{v=v}) -> EProc{v=v}
-  ELift : Lazy (IO ()) -> EProc{v=v} -> EProc{v=v}
+  ELift : ({[STDIO]} Eff ()) -> EProc{v=v} -> EProc{v=v}
   EBind : Lazy (Process{v=v} env s) -> EProc{v=v} -> EProc{v=v}
   EExternalR : Vect n (EProc{v=v}) -> EProc{v=v}
   EExternalL : Nat -> Nat -> EProc{v=v} -> EProc{v=v}
@@ -197,28 +200,61 @@ eraseProc (Forward i) = EForward (finToNat i)
 
 data Chan : Type -> Type where
   MkChan : List a -> List a -> Chan a
+  Indir : Nat -> Chan a
 
 Channels : Type -> Type
 Channels a = List (Chan a)
 
-writeSelf : a -> Chan a -> Chan a
-writeSelf x (MkChan r w) = MkChan r (w++[x])
+writeSelf : Nat -> a -> { [STATE (Channels a)] } Eff () 
+writeSelf n a =
+  do chs <- get
+     case index' n chs of
+          Just (MkChan r w) => case overwrite n (MkChan r (w++[a])) chs of
+                                    Just chs' => put chs'
 
-writeOther : a -> Chan a -> Chan a
-writeOther x (MkChan r w) = MkChan (r++[x]) w
+writeOther : Nat -> a -> {[STATE (Channels a)]} Eff ()
+writeOther n a =
+  do chs <- get
+     case index' n chs of
+          Just (MkChan r w) => case overwrite n (MkChan (r++[a]) w) chs of
+                                    Just chs' => put chs'
+          Just (Indir i) => writeOther i a
 
-readOther : Chan a -> Maybe (Chan a, a)
-readOther (MkChan r w) with (w)
-  readOther (MkChan r []) | [] = Nothing
-  readOther (MkChan r (x::xs)) | _ = Just (MkChan r xs,x)
+readSelf : Nat -> { [STATE (Channels a)] } Eff (Maybe a)
+readSelf n =
+  do chs <- get
+     case index' n chs of
+          Just (MkChan [] w) => return Nothing
+          Just (MkChan (x::xs) w) => case overwrite n (MkChan xs w) chs of
+                                          Just chs' => do put chs'
+                                                          return (Just x)
 
-readSelf : Chan a -> Maybe (Chan a, a)
-readSelf (MkChan r w) with (r)
-  readSelf (MkChan [] w) | [] = Nothing
-  readSelf (MkChan (x::xs) w) | _ = Just (MkChan xs w,x)
+readOther : Nat -> {[STATE (Channels a)]} Eff (Maybe a)
+readOther n =
+  do chs <- get
+     case index' n chs of
+          Just (MkChan r []) => return Nothing
+          Just (MkChan r (x::xs)) => case overwrite n (MkChan r xs) chs of
+                                          Just chs' => do put chs'
+                                                          return (Just x)
+          Just (Indir i) => readOther i
 
-newChan : Channels a -> (Channels a,Nat)
-newChan chs = (chs++[MkChan [] []],length chs)
+newChan : { [STATE (Channels a)] } Eff Nat
+newChan = 
+  do chs <- get 
+     put (chs++[MkChan [] []])
+     return (length chs)
+
+forward : Nat -> Nat -> { [STATE (Channels a)] } Eff ()
+forward n m =
+  do chs <- get
+     case index' m chs of
+          Just (Indir i) => forward n i
+          Just (MkChan mr mw) => case index' n chs of
+            Just (Indir i) => forward i m
+            Just (MkChan nr nw) => case overwrite m (Indir n) chs of
+              Just chs' => case overwrite n (MkChan (mr++nr) (nw++mw)) chs' of
+                Just chs'' => put chs''
 
 PState : (v:Vect m Type) -> Type
 PState v = (List Nat,Nat,EProc{v=v})
@@ -230,54 +266,63 @@ vindex' _ _ = Nothing
 
 -- TODO Use a state monad or something
 -- The types are loose here to try to avoid writting a peservation theorem
-step : Channels Msg -> PState v -> IO (Channels Msg,List (PState v))
-step chs (env,self,EClose) with (alter (writeSelf MTerm) self chs)
-  | Just chs' = return (chs',[])
-step chs (env,self,EWait n p) = -- TODO Applicative or something?
-  case index' n env of
-    Just i => case index' i chs of
-      Just ch => case readOther ch of
-        Just (ch',MTerm) => case overwrite i ch' chs of
-          Just chs' => return (chs',[(env,self,p)])
-        Nothing => return (chs,[(env,self,EWait n p)])
-step chs (env,self,ELift io p) =
+step : PState v 
+   -> { [STATE (Channels Msg),STDIO] } Eff (List (PState v))
+step (env,self,ELift io p) =
   do io
-     return (chs,[(env,self,p)])
-step chs (env,self,EBind ep cp) =
-  let (chs',i) = newChan chs
-  in return (chs',[([],i,eraseProc ep),(env++[i],self,cp)])
-step chs (env,self,ESendDR x p) =
-  case alter (writeSelf (MData x)) self chs of
-       Just chs' => return (chs',[(env,self,p)])
-step chs (env,self,ESendDL n cont) =
+     return [(env,self,p)]
+step (env,self,EBind ep cp) =
+  do i <- newChan
+     return [([],i,eraseProc ep),(env++[i],self,cp)]
+step (env,self,EClose) =
+  do writeSelf self MTerm
+     return []
+step (env,self,ESendDR x p) =
+  do writeSelf self (MData x)
+     return [(env,self,p)]
+step (env,self,EWait n p) = -- TODO Applicative or something?
   case index' n env of
-    Just i => case index' i chs of
-      Just ch => case readOther ch of
-        Just (ch',MData x) => case overwrite i ch' chs of
-          Just chs' => return (chs',[(env,self,cont (believe_me x))])
-        Nothing => return (chs,[(env,self,(ESendDL n cont))])
-step chs (env,self,EExternalR ps) =
-  case index' self chs of
-    Just ch => case readSelf ch of
-      Just (ch',MChoice l) => case vindex' l ps of
-        Just p => case overwrite self ch' chs of
-          Just chs' => return (chs',[(env,self,p)])
-      Nothing => return (chs,[(env,self,(EExternalR ps))])
-step chs (env,self,EExternalL i l p) =
-    case alter (writeOther (MChoice l)) i chs of
-      Just chs' => return (chs',[(env,self,p)])
+    Just i => do m <- readOther i
+                 case m of 
+                      Just Mterm => return [(env,self,p)]
+                      Nothing => return [(env,self,EWait n p)]
+step (env,self,ESendDL n cont) =
+  case index' n env of
+    Just i => do m <- readOther i
+                 case m of
+                      Just (MData x) => return [(env,self,cont (believe_me x))]
+                      Nothing => return [(env,self,(ESendDL n cont))]
+step (env,self,EExternalR ps) =
+  do m <- readSelf self
+     case m of
+       Just (MChoice l) => case vindex' l ps of
+         Just p => return [(env,self,p)]
+       Nothing => return [(env,self,(EExternalR ps))]
+step (env,self,EExternalL c l p) =
+  case index' c env of
+       Just i => do writeOther i (MChoice l)
+                    return [(env,self,p)]
+step (env,self,EForward n) =
+  case index' n env of
+       Just i => do forward i self
+                    return []
 
 -- Is list the best choice here?
-interp : Channels Msg -> List (PState v) -> IO ()
-interp _ [] = return ()
-interp chs (p::ps) =
-  do (chs',x) <- step chs p
-     interp chs' (ps++x)
+interp : List (PState v) -> { [STATE (Channels Msg),STDIO] } Eff ()
+interp [] = return ()
+interp (p::ps) =
+  do x <- step p
+     interp (ps++x)
 
-interpTop : {v:Vect k Type} -> Process{v=v} [] one -> IO ()
+-- TODO Seems like this STATE should be hidden
+interpTop : {v:Vect k Type} -> Process{v=v} [] one 
+         -> { [STATE (Channels Msg),STDIO] } Eff ()
 interpTop {v} p =
-  let (chs,i) = newChan{a=Msg} []
-  in interp {v} chs [([],i,eraseProc p)]
+  do i <- newChan
+     interp {v} [([],i,eraseProc p)]
+
+interpTopIO : {v:Vect k Type} -> Process{v=v} [] one -> IO ()
+interpTopIO {v} p = run (interpTop {v=v} p)
 
 t0 : Process [] one
 t0 = Lift (print 45) Close
@@ -330,11 +375,17 @@ SStream : {v:Vect k Type} -> (t:Fin k) -> SessionType v
 SStream t = Mu (external [one, sendD t Var])
 
 countUp : Nat -> Process{v=[Nat]} [] (SStream{v=[Nat]} 0)
-countUp n = ExternalR [Close,SendDR 0 (Bind (countUp n) (Forward
+countUp n = ExternalR [Close,SendDR n (Bind (countUp (S n)) (Forward
                       {s=(SStream{v=[Nat]} 0)} {t=(SStream{v=[Nat]} 0)} 0))]
 
 t11 : Process{v=[Nat]} [] one
-t11 = Bind (countUp 0) (ExternalL 0 0 Close)
+t11 = Bind (countUp 0) (ExternalL 0 1 
+                       (SendDL 0 (\n => 
+                        Lift (print n) 
+                       (ExternalL 0 1
+                       (SendDL 0 (\n => 
+                        Lift (print n) 
+                       (ExternalL 0 0 Close)))))))
 
 main : IO ()
-main = interpTop{v=[Int]} t10
+main = run (interpTop{v=[Int]} t10)
