@@ -197,3 +197,11 @@ isRTEq = isRTEq0 []
 getYes : (res : Dec p) -> case res of {Yes _ => p; No _ => ()}
 getYes (Yes p) = p
 getYes (No _) = ()
+
+DecProofType : {a:Type} -> Dec a -> Type
+DecProofType {a} (Yes _)  = a
+DecProofType {a} (No _)   = a -> Void
+
+decProof : {a:Type} -> (dec : Dec a) -> DecProofType dec
+decProof (Yes x)  = x
+decProof (No x)   = x
