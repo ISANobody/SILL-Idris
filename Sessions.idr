@@ -21,79 +21,111 @@ overwrite : Nat -> a -> List a -> Maybe (List a)
 overwrite n x l = alter (const x) n l
 
 data SType : Vect k Type -> Type where
-  SendD    : {v:Vect k Type} -> Fin k -> SType v
-  RecvD    : {v:Vect k Type} -> Fin k -> SType v
-  One      : SType v
-  External : Nat -> SType v
-  Internal : Nat -> SType v
+  SSendD    : {v:Vect k Type} -> Fin k -> SType v
+  SRecvD    : {v:Vect k Type} -> Fin k -> SType v
+  SOne      : SType v
+  SExternal : Nat -> SType v
+  SInternal : Nat -> SType v
+  SSendC    : SType v
+  SRecvC    : SType v
 
-injective_SendD : (SendD s = SendD t) -> (s = t)
-injective_SendD Refl = Refl
+injective_SSendD : (SSendD s = SSendD t) -> (s = t)
+injective_SSendD Refl = Refl
 
-injective_RecvD : (RecvD s = RecvD t) -> (s = t)
-injective_RecvD Refl = Refl
+injective_SRecvD : (SRecvD s = SRecvD t) -> (s = t)
+injective_SRecvD Refl = Refl
 
-injective_External : (External ss = External ts) -> ss = ts
-injective_External Refl = Refl
+injective_SExternal : (SExternal ss = SExternal ts) -> ss = ts
+injective_SExternal Refl = Refl
 
-injective_Internal : (Internal ss = Internal ts) -> ss = ts
-injective_Internal Refl = Refl
+injective_SInternal : (SInternal ss = SInternal ts) -> ss = ts
+injective_SInternal Refl = Refl
 
 instance DecEq (SType v) where
-  decEq One One = Yes Refl
-  decEq (External a) (External b) with (decEq a b)
-    decEq (External a) (External a) | Yes Refl = Yes Refl
-    decEq (External a) (External b) | No ctr = No (ctr . injective_External)
-  decEq (Internal a) (Internal b) with (decEq a b)
-    decEq (Internal a) (Internal a) | Yes Refl = Yes Refl
-    decEq (Internal a) (Internal b) | No ctr = No (ctr . injective_Internal)
-  decEq (SendD i) (SendD j) with (decEq i j)
-    decEq (SendD i) (SendD i) | Yes Refl = Yes Refl
-    decEq (SendD i) (SendD j) | No ctr = No (ctr . injective_SendD)
-  decEq (RecvD i) (RecvD j) with (decEq i j)
-    decEq (RecvD i) (RecvD i) | Yes Refl = Yes Refl
-    decEq (RecvD i) (RecvD j) | No ctr = No (ctr . injective_RecvD)
-  decEq One (External _) = No (\p => case p of Refl impossible)
-  decEq One (Internal _) = No (\p => case p of Refl impossible)
-  decEq One (SendD _) = No (\p => case p of Refl impossible)
-  decEq One (RecvD _) = No (\p => case p of Refl impossible)
-  decEq (External _) One = No (\p => case p of Refl impossible)
-  decEq (External _) (Internal _) = No (\p => case p of Refl impossible)
-  decEq (External _) (SendD _) = No (\p => case p of Refl impossible)
-  decEq (External _) (RecvD _) = No (\p => case p of Refl impossible)
-  decEq (Internal _) One = No (\p => case p of Refl impossible)
-  decEq (Internal _) (External _) = No (\p => case p of Refl impossible)
-  decEq (Internal _) (SendD _) = No (\p => case p of Refl impossible)
-  decEq (Internal _) (RecvD _) = No (\p => case p of Refl impossible)
-  decEq (SendD _) One = No (\p => case p of Refl impossible)
-  decEq (SendD _) (External _) = No (\p => case p of Refl impossible)
-  decEq (SendD _) (Internal _) = No (\p => case p of Refl impossible)
-  decEq (SendD _) (RecvD _) = No (\p => case p of Refl impossible)
-  decEq (RecvD _) One = No (\p => case p of Refl impossible)
-  decEq (RecvD _) (External _) = No (\p => case p of Refl impossible)
-  decEq (RecvD _) (Internal _) = No (\p => case p of Refl impossible)
-  decEq (RecvD _) (SendD _) = No (\p => case p of Refl impossible)
+  decEq SOne SOne = Yes Refl
+  decEq (SExternal a) (SExternal b) with (decEq a b)
+    decEq (SExternal a) (SExternal a) | Yes Refl = Yes Refl
+    decEq (SExternal a) (SExternal b) | No ctr = No (ctr . injective_SExternal)
+  decEq (SInternal a) (SInternal b) with (decEq a b)
+    decEq (SInternal a) (SInternal a) | Yes Refl = Yes Refl
+    decEq (SInternal a) (SInternal b) | No ctr = No (ctr . injective_SInternal)
+  decEq (SSendD i) (SSendD j) with (decEq i j)
+    decEq (SSendD i) (SSendD i) | Yes Refl = Yes Refl
+    decEq (SSendD i) (SSendD j) | No ctr = No (ctr . injective_SSendD)
+  decEq (SRecvD i) (SRecvD j) with (decEq i j)
+    decEq (SRecvD i) (SRecvD i) | Yes Refl = Yes Refl
+    decEq (SRecvD i) (SRecvD j) | No ctr = No (ctr . injective_SRecvD)
+  decEq SSendC SSendC = Yes Refl
+  decEq SRecvC SRecvC = Yes Refl
+  decEq SOne (SExternal _) = No (\p => case p of Refl impossible)
+  decEq SOne (SInternal _) = No (\p => case p of Refl impossible)
+  decEq SOne (SSendD _) = No (\p => case p of Refl impossible)
+  decEq SOne (SRecvD _) = No (\p => case p of Refl impossible)
+  decEq SOne SSendC = No (\p => case p of Refl impossible)
+  decEq SOne SRecvC = No (\p => case p of Refl impossible)
+  decEq (SExternal _) SOne = No (\p => case p of Refl impossible)
+  decEq (SExternal _) (SInternal _) = No (\p => case p of Refl impossible)
+  decEq (SExternal _) (SSendD _) = No (\p => case p of Refl impossible)
+  decEq (SExternal _) (SRecvD _) = No (\p => case p of Refl impossible)
+  decEq (SExternal _) SSendC = No (\p => case p of Refl impossible)
+  decEq (SExternal _) SRecvC = No (\p => case p of Refl impossible)
+  decEq (SInternal _) SOne = No (\p => case p of Refl impossible)
+  decEq (SInternal _) (SExternal _) = No (\p => case p of Refl impossible)
+  decEq (SInternal _) (SSendD _) = No (\p => case p of Refl impossible)
+  decEq (SInternal _) (SRecvD _) = No (\p => case p of Refl impossible)
+  decEq (SInternal _) SSendC = No (\p => case p of Refl impossible)
+  decEq (SInternal _) SRecvC = No (\p => case p of Refl impossible)
+  decEq (SSendD _) SOne = No (\p => case p of Refl impossible)
+  decEq (SSendD _) (SExternal _) = No (\p => case p of Refl impossible)
+  decEq (SSendD _) (SInternal _) = No (\p => case p of Refl impossible)
+  decEq (SSendD _) (SRecvD _) = No (\p => case p of Refl impossible)
+  decEq (SSendD _) SSendC = No (\p => case p of Refl impossible)
+  decEq (SSendD _) SRecvC = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) SOne = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) (SExternal _) = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) (SInternal _) = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) (SSendD _) = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) SSendC = No (\p => case p of Refl impossible)
+  decEq (SRecvD _) SRecvC = No (\p => case p of Refl impossible)
+  decEq SSendC SOne = No (\p => case p of Refl impossible)
+  decEq SSendC (SExternal _) = No (\p => case p of Refl impossible)
+  decEq SSendC (SInternal _) = No (\p => case p of Refl impossible)
+  decEq SSendC (SSendD _) = No (\p => case p of Refl impossible)
+  decEq SSendC SRecvC = No (\p => case p of Refl impossible)
+  decEq SSendC (SRecvD _) = No (\p => case p of Refl impossible)
+  decEq SRecvC SOne = No (\p => case p of Refl impossible)
+  decEq SRecvC (SExternal _) = No (\p => case p of Refl impossible)
+  decEq SRecvC (SInternal _) = No (\p => case p of Refl impossible)
+  decEq SRecvC (SSendD _) = No (\p => case p of Refl impossible)
+  decEq SRecvC SSendC = No (\p => case p of Refl impossible)
+  decEq SRecvC (SRecvD _) = No (\p => case p of Refl impossible)
 
 STypeArities : {holes:Vect k Type} -> LanguageSpec (SType holes)
-STypeArities (SendD _) = 1
-STypeArities (RecvD _) = 1
-STypeArities One = 0
-STypeArities (External n) = n
-STypeArities (Internal n) = n
+STypeArities (SSendD _) = 1
+STypeArities (SRecvD _) = 1
+STypeArities SOne = 0
+STypeArities (SExternal n) = n
+STypeArities (SInternal n) = n
+STypeArities SSendC = 2
+STypeArities SRecvC = 2
 
 SessionType : Vect k Type -> Type
 SessionType v = RegularTree (STypeArities {holes=v})
 
-sendD : {v:Vect k Type} -> Fin k -> SessionType v -> SessionType v
-sendD i s = Connect (SendD i) [s]
-recvD : {v:Vect k Type} -> Fin k -> SessionType v -> SessionType v
-recvD i s = Connect (RecvD i) [s]
-one : SessionType v
-one = Connect One []
-external : Vect k (SessionType v) -> SessionType v
-external {k} ss = Connect (External k) ss
-internal : Vect k (SessionType v) -> SessionType v
-internal {k} ss = Connect (Internal k) ss
+SendD : {v:Vect k Type} -> Fin k -> SessionType v -> SessionType v
+SendD i s = Connect (SSendD i) [s]
+RecvD : {v:Vect k Type} -> Fin k -> SessionType v -> SessionType v
+RecvD i s = Connect (SRecvD i) [s]
+One : SessionType v
+One = Connect SOne []
+External : Vect k (SessionType v) -> SessionType v
+External {k} ss = Connect (SExternal k) ss
+Internal : Vect k (SessionType v) -> SessionType v
+Internal {k} ss = Connect (SInternal k) ss
+SendC : SessionType v -> SessionType v -> SessionType v
+SendC s1 s2 = Connect SSendC [s1,s2]
+RecvC : SessionType v -> SessionType v -> SessionType v
+RecvC s1 s2 = Connect SRecvC [s1,s2]
 
 SesEq : SessionType v -> SessionType v -> Type
 SesEq s t = RTEq s t
@@ -116,7 +148,7 @@ data SubPerm : Vect j a -> Vect k a -> type where
 data Process : SesEnv k v -> SessionType v -> Type where
   Close : {k:Nat} -> Process (replicate k Nothing) one
   Wait  : (i:Fin k) 
-       -> {auto prf:index i env = (Just one)}
+       -> {auto prf:index i env = (Just One)}
        -> Process (replaceAt i Nothing env) s
        -> Process env s
   Forward : {env:SesEnv k v}
@@ -130,14 +162,14 @@ data Process : SesEnv k v -> SessionType v -> Type where
         -> {s:SessionType v}
         -> {t:SessionType v}
         -> index i v 
-        -> {auto prf:unfold t = sendD i s} 
+        -> {auto prf:unfold t = SendD i s} 
         -> Process env s 
         -> Process env t
   SendDL : {env:SesEnv k v}
         -> {s:SessionType v} 
         -> {t:SessionType v}
         -> (i:Fin k)
-        -> {auto jprf:index i env = Just (sendD j s)}
+        -> {auto jprf:index i env = Just (SendD j s)}
         -> (index j v -> Process (replaceAt i (Just s) env) t)
         -> Process env t
   Bind : {env:SesEnv k v}
@@ -151,7 +183,7 @@ data Process : SesEnv k v -> SessionType v -> Type where
   Lift : ({[STDIO]} Eff ()) -> Process env s -> Process env s
   ExternalR : {env:SesEnv k v}
            -> {t:SessionType v}
-           -> {auto prf:unfold t = external{k=n} ss}
+           -> {auto prf:unfold t = External{k=n} ss}
            -> (ps:HVect (map (Process env) ss))
            -> Process env t
   ExternalL : {env:SesEnv k v}
@@ -161,10 +193,42 @@ data Process : SesEnv k v -> SessionType v -> Type where
            -> (i:Fin k)
            -> (l:Fin n)
            -> {auto jprf: index i env = Just s}
-           -> {auto sprf: unfold s = external ss}
+           -> {auto sprf: unfold s = External ss}
            -> Process (replaceAt i (Just (index l ss)) env) t
            -> Process env t
-
+  -- TODO Enforce non-duplication
+  SendCR : {env:SesEnv k v}
+        -> {t:SessionType v}
+        -> {s1:SessionType v}
+        -> {s2:SessionType v}
+        -> {auto prf:unfold t = SendC s1 s2}
+        -> Process env s1
+        -> Process env s2
+        -> Process env t
+  RecvCR : {env:SesEnv k v}
+        -> {t:SessionType v}
+        -> {s1:SessionType v}
+        -> {s2:SessionType v}
+        -> {auto prf:unfold t = RecvC s1 s2}
+        -> Process (env++[Just s1]) s2
+        -> Process env t
+  -- TODO Enforce non-duplication
+  RecvCL : {env:SesEnv k v}
+        -> {t:SessionType v}
+        -> {s1:SessionType v}
+        -> {s2:SessionType v}
+        -> (i:Fin k)
+        -> {auto jprf:index i env = Just (RecvC s1 s2)}
+        -> Process env s1
+        -> Process env s2
+        -> Process env t
+  InternalR : {env:SesEnv k v}
+           -> {t:SessionType v}
+           -> {ss:Vect n (SessionType v)}
+           -> {auto prf:unfold t = Internal ss}
+           -> (i:Fin n)
+           -> Process env (index i ss)
+           -> Process env t
 
 data Msg : Type where
   MTerm : Msg
@@ -335,53 +399,53 @@ interp (p::ps) =
      interp (ps++x)
 
 -- TODO Seems like this STATE should be hidden
-interpTop : {v:Vect k Type} -> Process{v=v} [] one 
+interpTop : {v:Vect k Type} -> Process{v=v} [] One 
          -> { [STATE (Channels Msg),STDIO] } Eff ()
 interpTop {v} p =
   do i <- newChan
      interp {v} [([],i,eraseProc p)]
 
-interpTopIO : {v:Vect k Type} -> Process{v=v} [] one -> IO ()
+interpTopIO : {v:Vect k Type} -> Process{v=v} [] One -> IO ()
 interpTopIO {v} p = run (interpTop {v=v} p)
 
-t0 : Process [] one
+t0 : Process [] One
 t0 = Lift (print 45) Close
 
-t1 : Process [Just one] one
+t1 : Process [Just One] One
 t1 = Wait 0 Close
 
-t2 : Process [Just one] one
-t2 = Forward {s=one} {t=one} 0
+t2 : Process [Just One] One
+t2 = Forward {s=One} {t=One} 0
 
-t3 : Process{v=[Int]} [] (Mu (sendD 0 Var))
+t3 : Process{v=[Int]} [] (Mu (SendD 0 Var))
 t3 = SendDR 5 t3
 
-t4 : Process{v=[Int]} [Just (sendD 0 one)] one
+t4 : Process{v=[Int]} [Just (SendD 0 One)] One
 t4 = SendDL 0 (\ x => Wait 0 Close)
 
-t5 : Process{v=[Int]} [] (sendD 0 one)
+t5 : Process{v=[Int]} [] (SendD 0 One)
 t5 = SendDR 5 Close
 
-t6 : Process{v=[Int]} [] one
+t6 : Process{v=[Int]} [] One
 t6 = Bind t5 (SendDL 0 (\x => Lift (print x) (Wait 0 Close))) 
 
-t7 : Process{v=[Process [Just one] one]} [] (sendD 0 one)
-t7 = SendDR (Wait{env=[Just one]} 0 Close) Close
+t7 : Process{v=[Process [Just One] One]} [] (SendD 0 One)
+t7 = SendDR (Wait{env=[Just One]} 0 Close) Close
 
 -- Why is this acceptable but t8 failing?
 boom : Vect 1 Type
-boom = [Process{v=boom} [] (sendD 0 one)]
+boom = [Process{v=boom} [] (SendD 0 One)]
 
--- t8 : Process{v=boom} [] (sendD 0 one)
+-- t8 : Process{v=boom} [] (sendD 0 One)
 -- t8 = SendDR t8 Close
 
-t9 : Process [] one
+t9 : Process [] One
 t9 = Bind t0 (Wait 0 Close)
 
-t10' : Process{v=[Int]} [] (sendD 0 one)
+t10' : Process{v=[Int]} [] (SendD 0 One)
 t10' = SendDR 97 Close
 
-t10 : Process{v=[Int]} [] one
+t10 : Process{v=[Int]} [] One
 t10 = Bind t10' (Lift (print "asdf") (SendDL 0 (\x => (Lift (print x) (Wait 0
                 Close)))))
 
@@ -392,7 +456,7 @@ elemToFin (There x) with (elemToFin x)
   elemToFin (There x) | y = FS y
 
 SStream : {v:Vect k Type} -> (t:Fin k) -> SessionType v
-SStream t = Mu (external [one, sendD t Var])
+SStream t = Mu (External [One, SendD t Var])
 
 countUp : Nat -> Process{v=[Nat]} [] (SStream{v=[Nat]} 0)
 countUp n = ExternalR [Close,SendDR n (Bind (countUp (S n)) (Forward
@@ -411,8 +475,8 @@ sfilter p =
                              1)))
                 else (Bind{perm=Grab 0 Done} (sfilter p)
                      (ExternalL 1 1 
-                     (Forward{s=(sendD{v=[Nat]} 0 (Mu (external [one,sendD 0 Var])))}
-                             {t=(sendD{v=[Nat]} 0 (Mu (external [one,sendD 0 Var])))}
+                     (Forward{s=(SendD{v=[Nat]} 0 (Mu (External [One,SendD 0 Var])))}
+                             {t=(SendD{v=[Nat]} 0 (Mu (External [One,SendD 0 Var])))}
                              1))))))]
 
 sieve : Process [Just (SStream{v=[Nat]} 0)] (SStream{v=[Nat]} 0)
@@ -432,7 +496,34 @@ primes = Bind (countUp 2)
         (Forward{s=(SStream{v=[Nat]} 0)}{t=(SStream{v=[Nat]} 0)}
                 1))
 
-t11 : Process{v=[Nat]} [] one
+Queue : SessionType v -> SessionType v
+Queue s = Mu (External [RecvC s Var, Internal [One,SendC s Var]])
+
+emptyQ : Process [] (Queue s)
+elemQ : Process [Just s,Just (Queue s)] (Queue s)
+
+{- Doesn't work. I think the parameter s is messing it up?
+emptyQ {s} = ExternalR 
+               [ (RecvCR
+                 (Bind emptyQ
+                 (Bind{perm=Grab 1 (Grab 0 Done)} elemQ
+                 (Forward{s=Queue s} {t=Queue s} {sprf=believe_me ()} 2))))
+               , (InternalR 0
+                 (Close)) ] -}
+
+{- Doesn't work. Probably the s parameter again?
+elemQ = ExternalR
+          [ (RecvCR
+            (ExternalL 1 0
+            (RecvCL 1 (Forward 0)
+            (Bind{perm=Grab 1 (Grab 0 Done)} elemQ
+            (Forward 2)))))
+          , (InternalR 0
+            (SendCR (Forward 0)
+            (Forward 1)))]
+            -}
+
+t11 : Process{v=[Nat]} [] One
 t11 = Bind (primes)    (ExternalL 0 1 
                        (SendDL 0 (\n => 
                         Lift (print n) 
