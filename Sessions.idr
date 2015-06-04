@@ -247,6 +247,8 @@ data EProc : {v:Vect k Type} -> Type where
        -> Lazy (Process{v=v} env s) -> Vect k Nat -> EProc{v=v} -> EProc{v=v}
   EExternalR : Vect n (EProc{v=v}) -> EProc{v=v}
   EExternalL : Nat -> Nat -> EProc{v=v} -> EProc{v=v}
+  ETailBind : {env:SesEnv k v}
+       -> Lazy (Process{v=v} env s) -> Vect k Nat -> EProc{v=v}
 
 hVectMap : HVect (map (\x => {t:Type} -> x -> t) ts) -> HVect ts -> Vect (length ts) a
 hVectMap Nil Nil = Nil
@@ -269,6 +271,7 @@ eraseAll {ss=t::ts} Nil impossible
 eraseProc Close = EClose
 eraseProc (Lift io p) = ELift io (eraseProc p)
 eraseProc {v} (Wait n p) = EWait (finToNat n) (eraseProc{v=v} p)
+eraseProc (Bind{perm} ep (Forward _)) = ETailBind ep (erasePerm perm)
 eraseProc (Bind{perm} ep cp) = EBind ep (erasePerm perm) (eraseProc cp)
 eraseProc (SendDR x p) = ESendDR x (eraseProc p)
 eraseProc (SendDL n cont) = ESendDL (finToNat n) (eraseProc . cont)
@@ -358,6 +361,9 @@ step (env,self,ELift io p) =
 step (env,self,EBind ep cs cp) =
   do i <- newChan
      return [(remap env cs,i,eraseProc ep),(env++[i],self,cp)]
+step (env,self,ETailBind ep cs) =
+  do i <- newChan
+     return [(remap env cs,self,eraseProc ep)]
 step (env,self,EClose) =
   do writeSelf self MTerm
      return []
@@ -499,8 +505,8 @@ primes = Bind (countUp 2)
 Queue : SessionType v -> SessionType v
 Queue s = Mu (External [RecvC s Var, Internal [One,SendC s Var]])
 
-emptyQ : Process [] (Queue s)
-elemQ : Process [Just s,Just (Queue s)] (Queue s)
+-- emptyQ : Process [] (Queue s)
+-- elemQ : Process [Just s,Just (Queue s)] (Queue s)
 
 {- Doesn't work. I think the parameter s is messing it up?
 emptyQ {s} = ExternalR 
