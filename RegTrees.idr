@@ -62,10 +62,10 @@ data RegularTree : (t -> Nat) -> Clopen -> IsVar -> IsMu -> Type where
   Mu : RegularTree l Open NotVar NotMu -> RegularTree l Closed NotVar YesMu
   Var : RegularTree l Open YesVar NotMu
   Con : {l:t -> Nat} 
+     -> (c:t) 
      -> {clopens : Vect (l c) Clopen} 
      -> {isvars : Vect (l c) IsVar} 
      -> {ismus : Vect (l c) IsMu} 
-     -> (c:t) 
      -> HVect (zipWith3 (RegularTree l) clopens isvars ismus)
      -> RegularTree l (clopenMangle clopens) NotVar YesMu
 
@@ -96,19 +96,24 @@ instance (DecEq t,DecEq (HVect ts)) => DecEq (HVect (t::ts)) where
                               | No ctr = No (ctr . injective_HVect_Cons2)
     decEq (t1::ts1) (t2::ts2) | No ctr = No (ctr . injective_HVect_Cons1)
 
-instance DecEq t => DecEq (RegularTree {t} l c v m) where
-  decEq (Con {l} {clopens=clopens1} c cs) (Con {l} {clopens=clopens1} d ds) = ?p
-
 {-
+instance DecEq t => DecEq (RegularTree {t} l c v m) where
+  decEq (Con {l} {clopens=clopens1} c cs)
+        (Con {l} {clopens=clopens2} d ds) = ?p
+-}
+
+
+{- Can't call decEq on HVect w/o decEq on RegularTree, which would remove the
+- point of this ....
 flexDec : DecEq t => {l:t -> Nat}
          -> (s1:RegularTree l c1 v1 m1)
          -> (s2:RegularTree l c2 v2 m2)
          -> Dec (s1 = s2)
 flexDec (Con c cs) (Con d ds) with (decEq c d)
   flexDec (Con c cs) (Con d ds) | (No contra) = No (contra . injective_Connect1)
-  flexDec (Con c cs) (Con c ds) | (Yes Refl) with (flexDec cs ds)
+  flexDec (Con c cs) (Con c ds) | (Yes Refl) with (_)
     flexDec (Con c cs) (Con c ds) | (Yes Refl) | with_pat = ?flexDec_rhs
-    -}
+-}
 
 {-
 -- An instance for syntactic equality. Might need to tag this in the

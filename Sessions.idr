@@ -1,4 +1,4 @@
-module Sessions
+module Main
 
 import RegularTrees
 import Data.Fin
@@ -20,9 +20,9 @@ alter f (S k) (x::xs) with (alter f k xs)
 overwrite : Nat -> a -> List a -> Maybe (List a)
 overwrite n x l = alter (const x) n l
 
-data SType : Vect k Type -> Type where
-  SSendD    : {v:Vect k Type} -> Fin k -> SType v
-  SRecvD    : {v:Vect k Type} -> Fin k -> SType v
+data SType : .(Vect k Type) -> Type where
+  SSendD    : .{v:Vect k Type} -> Fin k -> SType v
+  SRecvD    : .{v:Vect k Type} -> Fin k -> SType v
   SOne      : SType v
   SExternal : Nat -> SType v
   SInternal : Nat -> SType v
@@ -100,7 +100,7 @@ instance DecEq (SType v) where
   decEq SRecvC SSendC = No (\p => case p of Refl impossible)
   decEq SRecvC (SRecvD _) = No (\p => case p of Refl impossible)
 
-STypeArities : {holes:Vect k Type} -> LanguageSpec (SType holes)
+STypeArities : .{holes:Vect k Type} -> LanguageSpec (SType holes)
 STypeArities (SSendD _) = 1
 STypeArities (SRecvD _) = 1
 STypeArities SOne = 0
@@ -145,7 +145,7 @@ data SubPerm : Vect j a -> Vect k a -> type where
 
 -- TODO Close should enforce that everything is Consumed
 -- TODO Forward should ensure that only the forwarded channel is left
-data Process : SesEnv k v -> SessionType v -> Type where
+data Process : .(SesEnv k v) -> .(SessionType v) -> Type where
   Close : {k:Nat} -> Process (replicate k Nothing) one
   Wait  : (i:Fin k) 
        -> {auto prf:index i env = (Just One)}
@@ -230,10 +230,31 @@ data Process : SesEnv k v -> SessionType v -> Type where
            -> Process env (index i ss)
            -> Process env t
 
+data ProcExp_ : Nat -> Maybe (SesEnv k v,SessionType v) -> Type where
+  Var : Maybe (Fin n) -> ProcExp_ n Nothing
+  Lam : ProcExp_ (S n) (Just (env,s)) -> ProcExp_ n (Just (env,s))
+  Proc : {env:SesEnv n v} -> Process env s -> ProcExp_ n (Just (env,s))
+
+self : Maybe (Fin n)
+self = Nothing
+
+lam : TTName -> ProcExp_ (S n) (Just (env,s)) -> ProcExp_ n (Just (env,s))
+lam _ body = Lam body
+
+dsl sill_dsl
+  variable = Var . Just
+  index_first = FZ
+  index_next = FS
+  lambda = lam
+
+ProcExp : SesEnv k v -> SessionType v -> Type
+ProcExp env s = ProcExp_ 0 (Just (env,s))
+
 data Msg : Type where
   MTerm : Msg
   MData : a -> Msg
   MChoice : Nat -> Msg
+
 
 -- I'm not sure if this is needed, or just needed w/o a progress theorem
 data EProc : {v:Vect k Type} -> Type where
@@ -254,11 +275,14 @@ hVectMap : HVect (map (\x => {t:Type} -> x -> t) ts) -> HVect ts -> Vect (length
 hVectMap Nil Nil = Nil
 hVectMap (f::fs) (x::xs) = (f x) :: (hVectMap fs xs)
 
+total
 erasePerm : {u:Vect k a} -> SubPerm u v -> Vect k Nat
 erasePerm Done = []
 erasePerm (Grab i p) = (finToNat i) :: erasePerm p
 
+total
 eraseProc : {v:Vect k Type} -> Process{v=v} env s -> EProc{v=v}
+total
 eraseAll : {env : SesEnv k v} -> {ss:Vect n (SessionType v)}
         -> HVect (map (Process env) ss)
         -> Vect n (EProc{v=v})
@@ -340,10 +364,12 @@ forward n m =
 PState : (v:Vect m Type) -> Type
 PState v = (List Nat,Nat,EProc{v=v})
 
-vindex' : Nat -> Vect k a -> Maybe a
+total
+vindex' : Nat -> Vect n a -> Maybe a
 vindex' Z (x::_) = Just x
-vindex' (S k) (_::xs) = vindex' k xs
-vindex' _ _ = Nothing
+vindex' Z [] = Nothing
+vindex' (S k) (x::xs) = vindex' k xs
+vindex' (S k) [] = Nothing
 
 remap : List a -> Vect j Nat -> List a
 remap v [] = []
@@ -353,7 +379,7 @@ remap v (n::ns) =
 
 -- TODO Use a state monad or something
 -- The types are loose here to try to avoid writting a peservation theorem
-step : PState v 
+step : (PState v)
    -> { [STATE (Channels Msg),STDIO] } Eff (List (PState v))
 step (env,self,ELift io p) =
   do io
@@ -414,11 +440,15 @@ interpTop {v} p =
 interpTopIO : {v:Vect k Type} -> Process{v=v} [] One -> IO ()
 interpTopIO {v} p = run (interpTop {v=v} p)
 
-t0 : Process [] One
-t0 = Lift (print 45) Close
+t00 : ProcExp [] One
+t00 = sill_dsl (Proc Close)
 
-t1 : Process [Just One] One
-t1 = Wait 0 Close
+t0 : Process [] One
+t0 = (Lift (print 45) Close)
+
+{- t1 : ProcExp [Just One] One
+t1 = sill_dsl (\c => Proc (case c of
+              Just x => Wait x Close)) -}
 
 t2 : Process [Just One] One
 t2 = Forward {s=One} {t=One} 0
@@ -429,11 +459,12 @@ t3 = SendDR 5 t3
 t4 : Process{v=[Int]} [Just (SendD 0 One)] One
 t4 = SendDL 0 (\ x => Wait 0 Close)
 
-t5 : Process{v=[Int]} [] (SendD 0 One)
-t5 = SendDR 5 Close
+{- t5 : Process{v=[Int]} [] (SendD 0 One)
+t5 = 'c <-{ send 'c 5;
+            close 'c}-<
 
 t6 : Process{v=[Int]} [] One
-t6 = Bind t5 (SendDL 0 (\x => Lift (print x) (Wait 0 Close))) 
+t6 = Bind t5 (SendDL 0 (\x => Lift (print x) (Wait 0 Close))) -}
 
 t7 : Process{v=[Process [Just One] One]} [] (SendD 0 One)
 t7 = SendDR (Wait{env=[Just One]} 0 Close) Close
@@ -465,8 +496,13 @@ SStream : {v:Vect k Type} -> (t:Fin k) -> SessionType v
 SStream t = Mu (External [One, SendD t Var])
 
 countUp : Nat -> Process{v=[Nat]} [] (SStream{v=[Nat]} 0)
-countUp n = ExternalR [Close,SendDR n (Bind (countUp (S n)) (Forward
-                      {s=(SStream{v=[Nat]} 0)} {t=(SStream{v=[Nat]} 0)} 0))]
+countUp n = ExternalR 
+              [ Close
+              , SendDR n 
+                (Bind (countUp (S n))
+                (Forward {s=(SStream{v=[Nat]} 0)} 
+                         {t=(SStream{v=[Nat]} 0)} 
+                         0))]
 
 sfilter : (Nat -> Bool) -> Process [Just (SStream{v=[Nat]} 0)]
                                   (SStream{v=[Nat]} 0)
@@ -548,4 +584,4 @@ t11 = Bind (primes)    (ExternalL 0 1
                        (ExternalL 0 0 (Wait 0 Close)))))))))))))))))
 
 main : IO ()
-main = run (interpTop{v=[Int]} t10)
+main = run (interpTop{v=[Nat]} t11)

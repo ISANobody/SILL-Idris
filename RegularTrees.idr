@@ -47,7 +47,7 @@ LanguageSpec t = t -> Nat
 --   Mu Mu is pretty pointless
 --   Open terms probably should be banned
 
-data RegularTree : {t:Type} -> (t -> Nat) -> Type where
+data RegularTree : .{t:Type} -> .(t -> Nat) -> Type where
   Mu : RegularTree l -> RegularTree l
   Var : RegularTree l
   Connect : (c:t) -> Vect (l c) (RegularTree l) -> RegularTree l
@@ -138,7 +138,7 @@ data RTEq_ : Vect n (RegularTree l,RegularTree l)
 RTEq : RegularTree l -> RegularTree l -> Type
 RTEq s t = RTEq_ [] s t
 
-RTEq_case : (DecEq t) => {t:Type} -> {l:t->Nat} -> {x:RegularTree l} -> {y:RegularTree l}
+RTEq_case : (DecEq t) => .{t:Type} -> .{l:t->Nat} -> .{x:RegularTree l} -> .{y:RegularTree l}
          -> (Elem (x,y) hyp -> b)
          -> (RTEq_ hyp (unfold x) y -> b)
          -> (RTEq_ hyp x (unfold y) -> b)
@@ -155,13 +155,21 @@ RTEq_case _ _ _ f (RTEqCon p) = f p
 exampleEq1 : (RTEq exampleType1 exampleType1)
 exampleEq1 = RTEqCon Nil
 
-isRTEq0 : (DecEq t) => {l:t->Nat} -> (hyp:Vect n (RegularTree l,RegularTree l)) -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ hyp x y)
+isRTEq0 : (DecEq t) => .{l:t->Nat}
+       -> .(hyp:Vect n (RegularTree l,RegularTree l))
+       -> .(x:RegularTree l) 
+       -> .(y:RegularTree l) 
+       -> Dec (RTEq_ hyp x y)
 isRTEq1 : (DecEq t) => {l:t->Nat}
-       -> (hyp:Vect n (RegularTree l,RegularTree l))
-       -> {p:Not (Elem (x,y) hyp)}
-       -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ hyp x y)
-isRTEq0_ : (DecEq t) => {l:t->Nat} -> (hyp:Vect n (RegularTree l,RegularTree l))
-       -> (z:(RegularTree l,RegularTree l)) -> Dec (uncurry (RTEq_ hyp) z)
+       -> .(hyp:Vect n (RegularTree l,RegularTree l))
+       -> .{p:Not (Elem (x,y) hyp)}
+       -> .(x:RegularTree l) 
+       -> .(y:RegularTree l) 
+       -> Dec (RTEq_ hyp x y)
+isRTEq0_ : (DecEq t) => .{l:t->Nat} 
+       -> .(hyp:Vect n (RegularTree l,RegularTree l))
+       -> .(z:(RegularTree l,RegularTree l)) 
+       -> Dec (uncurry (RTEq_ hyp) z)
 
 isRTEq0 hyp x y with (isElem (x,y) hyp)
   isRTEq0 hyp x y | (Yes prf) = Yes (Assumpt prf)
@@ -189,8 +197,8 @@ isRTEq1 hyp (Connect c cs) (Connect d ds) with (decEq c d)
   isRTEq1 hyp (Connect c cs) (Connect d ds) | (No contra) = No believe_me
 isRTEq1 _ _ _ = No believe_me
 
-isRTEq : (DecEq t) => {l:t->Nat} 
-      -> (x:RegularTree l) -> (y:RegularTree l) -> Dec (RTEq_ [] x y)
+isRTEq : (DecEq t) => .{l:t->Nat} 
+      -> .(x:RegularTree l) -> .(y:RegularTree l) -> Dec (RTEq_ [] x y)
 isRTEq = isRTEq0 []
 
 -- TODO figure out if there is a better
