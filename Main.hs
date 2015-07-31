@@ -55,7 +55,9 @@ promote [d|
   assub ((x,_):xs) ys= if asmem x ys then assub xs ys else False
 
   all2 :: (a -> b -> Bool) -> [a] -> [b] -> Bool
-  all2 f xs ys = and (zipWith f xs ys)
+  all2 f (x:xs) (y:ys) = if f x y 
+                         then all2 f xs ys
+			 else False
 
   mapf :: (a -> b -> c) -> b -> [a] -> [c]
   mapf _ _ [] = []
@@ -101,6 +103,14 @@ promote [d|
   unfold (Internal cs) = (Internal cs)
   unfold (External cs) = (External cs)
 
+  const2 :: a -> b -> c -> a
+  const2 x y z = x
+
+  boring :: [a] -> [b] -> Bool
+  boring xs ys = all2 (const2 True) xs ys
+
+  truconst :: a -> b -> Bool
+  truconst x y = True
   |]
 
 -- TODO Add a wellformedness checker that ensures types are
@@ -108,28 +118,47 @@ promote [d|
 -- 2) Closed
 -- 3) Choices have no duplicates
 
-type family RTEq1 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
-type instance RTEq1 hyp (Mu x) One = RTEq0 hyp (Unfold (Mu x)) One
-type instance RTEq1 hyp (Mu x) (SendD a s) 
-  = RTEq0 hyp (Unfold (Mu x)) (SendD a s)
-type instance RTEq1 hyp (Mu x) (Mu y) 
-  = RTEq0 hyp (Unfold (Mu x)) (Unfold (Mu y))
-type instance RTEq1 hyp One (Mu y) = RTEq0 hyp One (Unfold (Mu y))
-type instance RTEq1 hyp One One = True
-type instance RTEq1 hyp (SendD a s) (SendD a t) 
-  = RTEq0 ('(SendD a s, SendD a t) ': hyp) s t
-type instance RTEq1 hyp (External cs) (External ds) 
-  = All2 (TyCon2 (RTEq0 ('(External cs,External ds) ': hyp))) cs ds
+-- Helper function that shouldn't need to be defined. This should just be:
+-- all2 (RTEq0 ...) cs ds
+type family RTEq3 (hyp::[(Session,Session)]) (cs::[Session]) (ds::[Session])
+  :: Bool where
+  RTEq3 hyp '[] '[] = True
+  RTEq3 hyp (x ': xs) (y ': ys) = RTEq0 hyp x y :&& RTEq3 hyp xs ys
 
-type family RTEq0' (ctx::[(Session,Session)]) (hyp::[(Session,Session)])
-   (s::Session) (t::Session) :: Bool
-type instance RTEq0' '[] hyp s t = RTEq1 hyp s t
-type instance RTEq0' ('(a,b) ': ctx) hyp s t 
-  = If ((a :== s) :&& (b :== t)) True (RTEq1 hyp s t)
+-- Decides s = t (as regular trees). Assumes that (s,t) \notin hyp
+type family RTEq2 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool where
+  RTEq2 hyp (Mu x) One = RTEq0 hyp (Unfold (Mu x)) One
+  RTEq2 hyp (Mu x) (SendD a s) = RTEq0 hyp (Unfold (Mu x)) (SendD a s)
+  RTEq2 hyp (Mu x) (Mu y) = RTEq0 hyp (Unfold (Mu x)) (Unfold (Mu y))
+  RTEq2 hyp One (Mu y) = RTEq0 hyp One (Unfold (Mu y))
+  RTEq2 hyp One One = True
+  RTEq2 hyp (SendD a s) (SendD a t) = 
+    RTEq0 ('(SendD a s, SendD a t) ': hyp) s t
+  RTEq2 hyp (External cs) (External ds) = 
+    RTEq3 ('((External cs),(External ds)) ': hyp) cs ds
+  RTEq2 hyp (Internal cs) (Internal ds) = 
+    RTEq3 ('((Internal cs),(Internal ds)) ': hyp) cs ds
 
-type family RTEq0 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
-type instance RTEq0 hyp s t = RTEq0' hyp hyp s t
+-- Decides  whether two session types, s and t, are equal by first searching for
+-- assumed equalities in ctx and, if none are found, performing the next
+-- non-Assmp step of the circular coinduction. ctx should always be a subset of
+-- hyp (this could be strengthed to prefix/suffix).
+-- TODO enforce ctx <= hyp
+type family RTEq1 (ctx::[(Session,Session)]) (hyp::[(Session,Session)])
+   (s::Session) (t::Session) :: Bool where
+  RTEq1 '[] hyp s t = RTEq2 hyp s t
+  RTEq1 ('(s,t) ': ctx) hyp s t = True
+  RTEq1 ('(a,b) ': ctx) hyp s t = RTEq1 ctx hyp s t
 
+-- Decides whether two session types, s and t, are equal given the assumed
+-- equalities in hyp. This is a wrapper for RTEq1 that sets up its initial
+-- search context.
+type family RTEq0 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool 
+  where
+  RTEq0 hyp s t = RTEq1 hyp hyp s t
+
+-- Type operator that checks that two session types are equal (as regular trees)
+-- This works by calling the decision proceedure with its initial arguments
 type RTEq s t = RTEq0 '[] s t
 
 -- Thanks to Mu's we might always have a syntactic mismatch between the declared
@@ -183,20 +212,15 @@ taggedNew :: IO MyChan
 taggedNew = do ch <- newChan
                return (Recv ch,Send ch)
 
-
-myfin (Left e) = do tid <- myThreadId
-                    putStrLn ("finErr "++show tid++" "++show e)
-myfin (Right _) = do tid <- myThreadId
-                     putStrLn ("fine "++show tid)
-
 interp :: Process '[] One -> IO ()
 interp pin = do tid <- myThreadId
                 putStrLn ("Starting at "++show tid)
-                (r,w) <- taggedNew
-                let (r',w') = (Recv undefined,Send undefined)
-	        forkFinally (go [] (r',w) pin) myfin
+	        (ar,aw) <- taggedNew
+	        (br,bw) <- taggedNew
+	        forkIO (go [] (br,aw) pin)
 		yield
-		COne <- taggedRead (r,w')
+		COne <- taggedRead (ar,bw)
+		putStrLn ("Finished")
 		return ()
   where go :: [MyChan] -> (MyChan) -> Process env s -> IO ()
         go envch self Forward = 
@@ -207,7 +231,7 @@ interp pin = do tid <- myThreadId
 					               return ()
 					    _ -> f o (Recv r) (Send w)
 	   in do tid1 <- myThreadId
-	         tid2 <- forkFinally (f tid1 (fst self) (snd (head envch))) myfin
+	         tid2 <- forkIO (f tid1 (fst self) (snd (head envch)))
 	         (f tid2 (fst (head envch)) (snd self))
 		 return ()
         go _ self Close = taggedWrite self COne
@@ -219,17 +243,12 @@ interp pin = do tid <- myThreadId
 	   do (CData x) <- taggedRead (index (fromSing n) env)
 	      go env self (f (unsafeCoerce x))
 	go env self (Bind p1 p2) = do tid <- myThreadId
-	                              putStrLn ("Bind "++show tid)
 	                              (ar,aw) <- taggedNew
 	                              (br,bw) <- taggedNew
-				      putStrLn ("Bind' "++show tid)
-	                              forkFinally
+	                              forkIO
 				        (do tid' <- myThreadId
-				            putStrLn ("From "++show tid
-					             ++" to "++show tid')
 					    yield
-				            go [] (br,aw) p1) myfin
-				      putStrLn ("Bind'' "++show tid)
+				            go [] (br,aw) p1)
 				      yield
 	                              go ((ar,bw):env) self p2
 	go env self (TailBind p) = go env self p
@@ -264,14 +283,15 @@ t4 = Bind t3 Forward
 t5 :: Process '[SendD Int One] (SendD String One)
 t5 = RecvDL SZ (\i -> SendDR (show i) (Wait SZ Close))
 
+
 t6 :: Process '[] (Mu (SendD String Var))
 t6 = SendDR "foo" (Bind t6 Forward)
 
 t7 :: IO ()
 t7 = interp (Bind t4 (RecvDL SZ (\f -> RecvDL SZ (\i -> Lift (print f) (Lift (print i) (Wait SZ Close))))))
 
---t8 :: Process '[] (Internal [One,One])
---t8 = InternalR (HCons Close (HCons Close HNil))
+t8 :: Process '[] (Internal [One,One])
+t8 = InternalR SZ Close
 
 type Stream a = Mu (External [One,SendD a Var])
 type IStream a = Mu (Internal [One,SendD a Var])
@@ -284,32 +304,23 @@ countdown :: Nat -> Process '[] (IStream Nat)
 countdown Z = InternalR (SS SZ) (SendDR Z (InternalR SZ Close))
 countdown (S k) = InternalR (SS SZ) (SendDR (S k) (countdown k))
 
--- Fails
+
 countup' :: Nat -> Process '[] (Stream Nat)
 countup' n = (ExternalR (HCons Close (HCons (SendDR n (TailBind (countup' (S n)))) HNil)))
 
 
--- Works
-{-countup'' :: Nat -> Process '[] (Stream Nat)
-countup'' n = (ExternalR Close (SendDR n 
-              (ExternalR Close (SendDR (S n) (countup'' (S (S n)))))))
-	      -}
-
--- Works
-{- countup''' :: Nat -> Process '[] (Stream Nat)
-countup''' n = (ExternalR [Close,(SendDR n 
-              (ExternalR [Close,(SendDR (S n) (TailBind (countup''' (S (S n)))))]))])-}
 
 t9 :: IO ()
-t9 = interp (Bind (countup Z)
-                (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (print i) 
-		(ExternalL SZ SZ (Wait SZ Close))))))
+t9 = interp (Bind (countup' Z)
+                (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (putStrLn . show $ i) 
+                (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (putStrLn . show $ i) 
+		(ExternalL SZ SZ (Wait SZ Close)))))))))
 
 t11 :: IO ()
 t11 = interp (Bind (countdown (S (S Z))) go)
    where go :: Process '[IStream Nat] One
          go = (InternalL SZ (HCons (Wait SZ Close) 
-                            (HCons (RecvDL SZ (\i -> Lift (print i) go)) HNil)))
+                            (HCons (RecvDL SZ (\i -> Lift (putStrLn . show $ i) go)) HNil)))
 
 t10 :: Process '[Internal '[One]] One
 t10 = InternalL SZ (HCons (Wait SZ Close) HNil)

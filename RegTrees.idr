@@ -61,8 +61,8 @@ clopenMangle (Closed::cs) = clopenMangle cs
 data RegularTree : (t -> Nat) -> Clopen -> IsVar -> IsMu -> Type where
   Mu : RegularTree l Open NotVar NotMu -> RegularTree l Closed NotVar YesMu
   Var : RegularTree l Open YesVar NotMu
-  Con : {l:t -> Nat} 
-     -> (c:t) 
+  Con : (c:t) 
+     -> {l:t -> Nat} 
      -> {clopens : Vect (l c) Clopen} 
      -> {isvars : Vect (l c) IsVar} 
      -> {ismus : Vect (l c) IsMu} 
@@ -96,11 +96,9 @@ instance (DecEq t,DecEq (HVect ts)) => DecEq (HVect (t::ts)) where
                               | No ctr = No (ctr . injective_HVect_Cons2)
     decEq (t1::ts1) (t2::ts2) | No ctr = No (ctr . injective_HVect_Cons1)
 
-{-
 instance DecEq t => DecEq (RegularTree {t} l c v m) where
-  decEq (Con {l} {clopens=clopens1} c cs)
-        (Con {l} {clopens=clopens2} d ds) = ?p
--}
+  decEq (Con c cs)
+        (Con d ds) = ?p
 
 
 {- Can't call decEq on HVect w/o decEq on RegularTree, which would remove the
