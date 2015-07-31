@@ -2,16 +2,14 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, PolyKinds, UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
 {-# OPTIONS -Wall -fno-warn-unused-do-bind #-}
+module Sessions where
 import Control.Concurrent
-import Control.Concurrent.Chan
 import Unsafe.Coerce
-import Data.List
 import Data.Singletons
 import Data.Singletons.TH
 import Data.Singletons.Prelude.Base
 import Data.Singletons.Prelude.List
 import Data.Singletons.Prelude.Eq
-import Control.Exception
 
 singletons [d|
   data Nat = Z | S Nat deriving (Show)
@@ -68,6 +66,11 @@ promote [d|
   |]
 
 -- TODO split modules to allow for OverloadedLists here
+data Vect :: Nat -> * -> * where
+  VNil :: Vect Z a
+  VCons :: a -> Vect n a -> Vect (S n) a
+
+-- TODO split modules to allow for OverloadedLists here
 data HList :: [*] -> * where
   HNil :: HList '[]
   HCons :: a -> (HList ts) -> HList (a ': ts)
@@ -83,6 +86,7 @@ promote [d|
     Mu :: Session -> Session
     Var :: Session
     SendD :: a -> Session -> Session
+    RecvD :: a -> Session -> Session
     One :: Session
     External :: [Session] -> Session
     Internal :: [Session] -> Session
@@ -103,14 +107,6 @@ promote [d|
   unfold (Internal cs) = (Internal cs)
   unfold (External cs) = (External cs)
 
-  const2 :: a -> b -> c -> a
-  const2 x y z = x
-
-  boring :: [a] -> [b] -> Bool
-  boring xs ys = all2 (const2 True) xs ys
-
-  truconst :: a -> b -> Bool
-  truconst x y = True
   |]
 
 -- TODO Add a wellformedness checker that ensures types are
@@ -201,14 +197,19 @@ data Comms where
   CData :: a -> Comms
   CChoice :: SNat n -> Comms
 
-data TaggedChan a = Recv (Chan a) | Send (Chan a)
-type MyChan = (TaggedChan Comms,TaggedChan Comms)
+data RWTag = RTag | WTag
 
-taggedRead :: MyChan -> IO Comms
+data TaggedChan :: RWTag -> * -> * where
+  Recv :: Chan a -> TaggedChan RTag a
+  Send :: Chan a -> TaggedChan WTag a
+
+type BiChan a = (TaggedChan RTag a,TaggedChan WTag a)
+
+taggedRead :: BiChan a -> IO a
 taggedRead (Recv c,Send _) = readChan c
-taggedWrite :: MyChan -> Comms -> IO ()
+taggedWrite :: BiChan Comms -> Comms -> IO ()
 taggedWrite (Recv _,Send c) x = writeChan c x
-taggedNew :: IO MyChan
+taggedNew :: IO (BiChan a)
 taggedNew = do ch <- newChan
                return (Recv ch,Send ch)
 
@@ -222,9 +223,14 @@ interp pin = do tid <- myThreadId
 		COne <- taggedRead (ar,bw)
 		putStrLn ("Finished")
 		return ()
-  where go :: [MyChan] -> (MyChan) -> Process env s -> IO ()
+  where go :: [BiChan Comms] -> (BiChan Comms) -> Process env s -> IO ()
         go envch self Forward = 
-	   let f o (Recv r) (Send w) = do x <- readChan r
+	   let -- Zombie fowarder
+	       f :: ThreadId -- Other forwarder zombie
+	         -> (TaggedChan RTag Comms)
+		 -> (TaggedChan WTag Comms)
+		 -> IO ()
+	       f o (Recv r) (Send w) = do x <- readChan r
 	                                  writeChan w x
 					  case x of
 					    COne -> do killThread o
@@ -242,13 +248,9 @@ interp pin = do tid <- myThreadId
 	go env self (RecvDL n f) = 
 	   do (CData x) <- taggedRead (index (fromSing n) env)
 	      go env self (f (unsafeCoerce x))
-	go env self (Bind p1 p2) = do tid <- myThreadId
-	                              (ar,aw) <- taggedNew
+	go env self (Bind p1 p2) = do (ar,aw) <- taggedNew
 	                              (br,bw) <- taggedNew
-	                              forkIO
-				        (do tid' <- myThreadId
-					    yield
-				            go [] (br,aw) p1)
+	                              forkIO (go [] (br,aw) p1)
 				      yield
 	                              go ((ar,bw):env) self p2
 	go env self (TailBind p) = go env self p
@@ -262,8 +264,8 @@ interp pin = do tid <- myThreadId
 	   do taggedWrite self (CChoice k)
 	      go env self p
 	go env self (InternalL n ps) =
-	   do CChoice n <- taggedRead (index (fromSing n) env)
-	      go env self (unsafeCoerce (hindex n ps))
+	   do CChoice l <- taggedRead (index (fromSing n) env)
+	      go env self (unsafeCoerce (hindex l ps))
 
 t1 :: Process '[] (Mu One)
 t1 = Close
@@ -313,7 +315,7 @@ countup' n = (ExternalR (HCons Close (HCons (SendDR n (TailBind (countup' (S n))
 t9 :: IO ()
 t9 = interp (Bind (countup' Z)
                 (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (putStrLn . show $ i) 
-                (ExternalL SZ (SS SZ) (RecvDL SZ (\i -> Lift (putStrLn . show $ i) 
+                (ExternalL SZ (SS SZ) (RecvDL SZ (\x -> Lift (putStrLn . show $ x) 
 		(ExternalL SZ SZ (Wait SZ Close)))))))))
 
 t11 :: IO ()
@@ -324,7 +326,3 @@ t11 = interp (Bind (countdown (S (S Z))) go)
 
 t10 :: Process '[Internal '[One]] One
 t10 = InternalL SZ (HCons (Wait SZ Close) HNil)
-
-main :: IO ()
-main = interp (go 0)
-  where go n = Lift (putStrLn (show n)) (Bind (go (n+1)) Forward)
