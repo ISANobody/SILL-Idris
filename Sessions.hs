@@ -10,6 +10,7 @@ import Data.Singletons.TH
 import Data.Singletons.Prelude.Base
 import Data.Singletons.Prelude.List
 import Data.Singletons.Prelude.Eq
+import Data.Singletons.Prelude.Maybe
 
 singletons [d|
   data Nat = Z | S Nat deriving (Show)
@@ -32,10 +33,6 @@ promote [d|
   update :: Nat -> a -> [a] -> [a]
   update Z x (_:ys) = x:ys
   update (S k) x (y:ys) = y:(update k x ys)
-
-  update0 :: Nat -> [a] -> a -> [a]
-  update0 Z (_:ys) x = x:ys
-  update0 (S k) (y:ys) x = y:(update0 k ys x)
 
   asmem :: (Eq k) => k -> [(k,v)] -> Bool
   asmem _ [] = False
@@ -61,7 +58,13 @@ promote [d|
   mapf _ _ [] = []
   mapf f z (x:xs) = (f x z):(mapf f z xs)
 
-  mapf0 :: Nat -> [a] -> b -> ([a] -> b -> c) -> [a] -> [c]
+  update0 :: Nat -> [Maybe a] -> a -> [Maybe a]
+  update0 Z (_:ys) x = (Just x):ys
+  update0 (S k) (y:ys) x = y:(update0 k ys x)
+
+  -- This is here because doing singleton higher order stuff is a pain w/o using
+  -- the TH stuff
+  mapf0 :: Nat -> [Maybe a] -> b -> ([Maybe a] -> b -> c) -> [a] -> [c]
   mapf0 n a z f xs = mapf f z (map (update0 n a) xs)
   |]
 
@@ -78,6 +81,7 @@ data HList :: [*] -> * where
 hindex :: SNat n -> HList ts -> Index n ts
 hindex SZ (HCons x _) = x
 hindex (SS k) (HCons _ xs) = hindex k xs
+hindex _ _ = error "hindex index out of bounds"
 
 -- Tracking whether this is open or closed makes this type unpromotable
 -- Choice is over Nat b/c String is unpromotable
@@ -87,6 +91,8 @@ promote [d|
     Var :: Session
     SendD :: a -> Session -> Session
     RecvD :: a -> Session -> Session
+    SendC :: Session -> Session -> Session
+    RecvC :: Session -> Session -> Session
     One :: Session
     External :: [Session] -> Session
     Internal :: [Session] -> Session
@@ -107,6 +113,21 @@ promote [d|
   unfold (Internal cs) = (Internal cs)
   unfold (External cs) = (External cs)
 
+  allNothing :: [Maybe a] -> Bool
+  allNothing [] = True
+  allNothing (Nothing:xs) = allNothing xs
+  allNothing _ = False
+
+  allButNothing :: Nat -> [Maybe a] -> Bool
+  allButNothing Z (Just _:xs) = allNothing xs
+  allButNothing (S n) (Nothing:xs) = allButNothing n xs
+
+  zipJust :: [Maybe a] -> [Maybe a] -> [Maybe a]
+  zipJust [] [] = []
+  zipJust (Just x:xs) (Nothing:ys) = Just x:zipJust xs ys
+  zipJust (Nothing:xs) (Just y:ys) = Just y:zipJust xs ys
+  zipJust (Nothing:xs) (Nothing:ys) = Nothing:zipJust xs ys
+
   |]
 
 -- TODO Add a wellformedness checker that ensures types are
@@ -123,13 +144,17 @@ type family RTEq3 (hyp::[(Session,Session)]) (cs::[Session]) (ds::[Session])
 
 -- Decides s = t (as regular trees). Assumes that (s,t) \notin hyp
 type family RTEq2 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool where
-  RTEq2 hyp (Mu x) One = RTEq0 hyp (Unfold (Mu x)) One
-  RTEq2 hyp (Mu x) (SendD a s) = RTEq0 hyp (Unfold (Mu x)) (SendD a s)
-  RTEq2 hyp (Mu x) (Mu y) = RTEq0 hyp (Unfold (Mu x)) (Unfold (Mu y))
-  RTEq2 hyp One (Mu y) = RTEq0 hyp One (Unfold (Mu y))
+  RTEq2 hyp (Mu x) t = RTEq0 hyp (Unfold (Mu x)) t
+  RTEq2 hyp s (Mu y) = RTEq0 hyp s (Unfold (Mu y))
   RTEq2 hyp One One = True
   RTEq2 hyp (SendD a s) (SendD a t) = 
     RTEq0 ('(SendD a s, SendD a t) ': hyp) s t
+  RTEq2 hyp (RecvD a s) (RecvD a t) = 
+    RTEq0 ('(RecvD a s, RecvD a t) ': hyp) s t
+  RTEq2 hyp (SendC s1 s2) (SendC t1 t2) =
+    RTEq0 ('((SendC s1 s2),(SendC t1 t2)) ': hyp) s1 t1
+    :&&
+    RTEq0 ('((SendC s1 s2),(SendC t1 t2)) ': hyp) s2 t2
   RTEq2 hyp (External cs) (External ds) = 
     RTEq3 ('((External cs),(External ds)) ': hyp) cs ds
   RTEq2 hyp (Internal cs) (Internal ds) = 
@@ -162,17 +187,60 @@ type RTEq s t = RTEq0 '[] s t
 -- a result, we have a lot of (Unfold t ~ s) constraints. The more general 
 -- (RTEq t s ~ True) seems to confuse the constraint solver. I believe upcoming
 -- injective type families would solve this.
-data Process :: [Session] -> Session -> * where
-  Close :: (Unfold t ~ One) => Process '[] t
+data Process :: [Maybe Session] -> Session -> * where
+  Close :: (Unfold t ~ One
+           ,AllNothing env ~ True) => Process env t
   Wait :: (Inbounds n env ~ True
-          ,Unfold (Index n env) ~ One) => SNat n 
-	-> Process (Remove n env) s -> Process env s
+          ,Index n env ~ Just t
+	  ,Unfold t ~ One) 
+	=> SNat n 
+	-> Process (Update n Nothing env) s
+	-> Process env s
   SendDR :: (Unfold t ~ SendD a s) => a -> Process env s -> Process env t
+  SendDL :: (Inbounds n env ~ True
+	    ,Index n env ~ Just t
+            ,Unfold t ~ SendD a t')
+	 => SNat n
+	 -> a
+	 -> Process (Update n (Just t') env) s
+	 -> Process env s
+  RecvDR :: (Unfold t ~ RecvD a s)
+         => (a -> Process env s)
+	 -> Process env t
   RecvDL :: (Inbounds n env ~ True
-            ,Unfold (Index n env) ~ SendD a t) => SNat n
-        -> (a -> Process (Update n t env) s) -> Process env s
-  Forward :: (RTEq t s ~ True) => Process ('[t]) s
-  Bind :: Process '[] t -> Process (t ': env) s -> Process env s
+	    ,Index n env ~ Just t
+            ,Unfold t ~ SendD a t')
+	=> SNat n
+        -> (a -> Process (Update n (Just t') env) s)
+	-> Process env s
+  SendCR :: (Unfold t ~ SendC s1 s2
+            ,ZipJust env1 env2 ~ env)
+         => Process env1 s1
+	 -> Process env2 s2
+	 -> Process env t
+  SendCL :: (Inbounds n env ~ True
+	    ,Index n env ~ Just t
+            ,Unfold t ~ RecvC t1 t2
+	    ,ZipJust env1 env2 ~ (Update n (Just t2) env))
+	 => SNat n
+	 -> Process env1 t1
+	 -> Process env2 s
+	 -> Process env s
+  RecvCR :: (Unfold t ~ RecvC s1 s2)
+         => Process (env :++ '[Just s1]) s2
+	 -> Process env t
+  RecvCL :: (Inbounds n env ~ True
+            ,Index n env ~ Just t
+            ,Unfold t ~ SendC t1 t2)
+	 => SNat n
+	 -> Process ((Update n (Just t2) env) :++ '[Just t1]) s
+	 -> Process env s
+  Forward :: (AllButNothing n env ~ True
+	     ,Index n env ~ Just t
+             ,RTEq t s ~ True)
+          => SNat n 
+	  -> Process env s
+  Bind :: Process '[] t -> Process (Just t ': env) s -> Process env s
   TailBind :: (RTEq t s ~ True) => Process '[] t -> Process '[] s
   Lift :: IO () -> Process env s -> Process env s
   ExternalR :: (Unfold t ~ External choices
@@ -180,15 +248,19 @@ data Process :: [Session] -> Session -> * where
             => HList ps -> Process env t
   ExternalL :: (Inbounds n env ~ True
                ,Inbounds c choices ~ True
-               ,Unfold (Index n env) ~ External choices)
-            => SNat n -> SNat c -> Process (Update n (Index c choices) env) t
-            -> Process env t
+	       ,Index n env ~ Just t
+               ,Unfold t ~ External choices)
+            => SNat n 
+	    -> SNat c 
+	    -> Process (Update n (Just (Index c choices)) env) s
+            -> Process env s
   InternalR :: (Unfold t ~ Internal choices
                ,Inbounds n choices ~ True
 	       ,Index n choices ~ s)
             =>  SNat n -> Process env s -> Process env t
   InternalL :: (Inbounds n env ~ True
-               ,Unfold (Index n env) ~ Internal choices
+	       ,Index n env ~ Just t
+               ,Unfold t ~ Internal choices
 	       ,ps ~ (Mapf0 n env s (TyCon2 Process) choices))
             => SNat n -> HList ps -> Process env s
 
@@ -196,6 +268,7 @@ data Comms where
   COne :: Comms
   CData :: a -> Comms
   CChoice :: SNat n -> Comms
+  CChan :: BiChan Comms -> Comms
 
 data RWTag = RTag | WTag
 
@@ -224,7 +297,7 @@ interp pin = do tid <- myThreadId
 		putStrLn ("Finished")
 		return ()
   where go :: [BiChan Comms] -> (BiChan Comms) -> Process env s -> IO ()
-        go envch self Forward = 
+        go envch self (Forward n) =
 	   let -- Zombie fowarder
 	       f :: ThreadId -- Other forwarder zombie
 	         -> (TaggedChan RTag Comms)
@@ -236,18 +309,42 @@ interp pin = do tid <- myThreadId
 					    COne -> do killThread o
 					               return ()
 					    _ -> f o (Recv r) (Send w)
-	   in do tid1 <- myThreadId
-	         tid2 <- forkIO (f tid1 (fst self) (snd (head envch)))
-	         (f tid2 (fst (head envch)) (snd self))
-		 return ()
+              
+           in let (er,ew) = index (fromSing n) envch
+	      in do tid1 <- myThreadId
+	            tid2 <- forkIO (f tid1 (fst self) ew)
+	            f tid2 er (snd self)
         go _ self Close = taggedWrite self COne
 	go env self (Wait n p) = do COne <- taggedRead (index (fromSing n) env)
 	                            go env self p
         go env self (SendDR x p) = do taggedWrite self (CData x)
 	                              go env self p
+	go env self (SendDL n x p) = do taggedWrite (index (fromSing n) env)
+	                                            (CData x)
+					go env self p
+	go env self (RecvDR k) = do (CData x) <- taggedRead self
+	                            go env self (k (unsafeCoerce x))
 	go env self (RecvDL n f) = 
 	   do (CData x) <- taggedRead (index (fromSing n) env)
 	      go env self (f (unsafeCoerce x))
+	go env self (SendCR p1 p2) = 
+	  do (ar,aw) <- taggedNew
+	     (br,bw) <- taggedNew
+	     forkIO (go env (br,aw) p1)
+	     taggedWrite self (CChan (ar,bw))
+	     go env self p2
+	go env self (SendCL n p1 p2) =
+	  do (ar,aw) <- taggedNew
+	     (br,bw) <- taggedNew
+	     forkIO (go env (br,aw) p1)
+	     taggedWrite (index (fromSing n) env) (CChan (ar,bw))
+	     go env self p2
+	go env self (RecvCR p) =
+	  do CChan c <- taggedRead self
+	     go (env ++ [c]) self p
+	go env self (RecvCL n p) =
+	  do CChan c <- taggedRead (index (fromSing n) env)
+	     go (env ++ [c]) self p
 	go env self (Bind p1 p2) = do (ar,aw) <- taggedNew
 	                              (br,bw) <- taggedNew
 	                              forkIO (go [] (br,aw) p1)
@@ -270,8 +367,8 @@ interp pin = do tid <- myThreadId
 t1 :: Process '[] (Mu One)
 t1 = Close
 
-t1' :: Process '[One] (Mu One)
-t1' = Forward
+t1' :: Process '[Just One] (Mu One)
+t1' = Forward SZ
 
 t2 :: Process '[] (SendD Int One)
 t2 = SendDR 5 Close
@@ -280,14 +377,14 @@ t3 :: Process '[] (SendD Float (SendD Int One))
 t3 = SendDR 5 (SendDR 6 Close)
 
 t4 :: Process '[] (SendD Float (SendD Int One))
-t4 = Bind t3 Forward
+t4 = Bind t3 (Forward SZ)
 
-t5 :: Process '[SendD Int One] (SendD String One)
+t5 :: Process '[Just (SendD Int One)] (SendD String One)
 t5 = RecvDL SZ (\i -> SendDR (show i) (Wait SZ Close))
 
 
 t6 :: Process '[] (Mu (SendD String Var))
-t6 = SendDR "foo" (Bind t6 Forward)
+t6 = SendDR "foo" (Bind t6 (Forward SZ))
 
 t7 :: IO ()
 t7 = interp (Bind t4 (RecvDL SZ (\f -> RecvDL SZ (\i -> Lift (print f) (Lift (print i) (Wait SZ Close))))))
@@ -320,9 +417,9 @@ t9 = interp (Bind (countup' Z)
 
 t11 :: IO ()
 t11 = interp (Bind (countdown (S (S Z))) go)
-   where go :: Process '[IStream Nat] One
+   where go :: Process '[Just (IStream Nat)] One
          go = (InternalL SZ (HCons (Wait SZ Close) 
                             (HCons (RecvDL SZ (\i -> Lift (putStrLn . show $ i) go)) HNil)))
 
-t10 :: Process '[Internal '[One]] One
+t10 :: Process '[Just (Internal '[One])] One
 t10 = InternalL SZ (HCons (Wait SZ Close) HNil)
