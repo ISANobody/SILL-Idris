@@ -1,9 +1,11 @@
 {-# LANGUAGE RebindableSyntax, DataKinds #-}
 {-# LANGUAGE GADTs, DataKinds, KindSignatures, TypeFamilies, TypeOperators #-}
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, PolyKinds, UndecidableInstances #-}
-{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns, Rank2Types #-}
 
-import Prelude hiding ((>>),(>>=),return)
+import Unsafe.Coerce
+import Prelude hiding ((>>),(>>=),return,fail)
+import qualified Prelude as P
 import Data.Singletons
 import Data.Singletons.Prelude
 import Data.Singletons.TH
@@ -54,59 +56,81 @@ promote [d|
 
   |]
 
-data IState :: [Maybe Nat] -> Maybe [Maybe Nat] -> * -> * where
-  IState :: ([Int] -> (a,[Int])) -> IState env env' a
+class IxMonad m where
+  return :: a -> m k k a
+  (>>=) :: m k1 k2 a -> (a -> m k2 k3 b) -> m k1 k3 b
+  (>>) :: m k1 k2 a -> m k2 k3 b -> m k1 k3 b
+  fail :: String -> m k1 k2 a
 
-runIState :: IState env env' a -> ([Int] -> (a,[Int]))
+  m >> n = m >>= const n
+  fail = error
+
+-- Taken from Coroutine-0.1.0.0
+
+newtype WM m x y a = LiftWM { runWM :: m a }
+instance Prelude.Monad m => IxMonad (WM m) where
+    return x = LiftWM (P.return x)
+    m >>= f  = LiftWM (runWM m P.>>= runWM . f)
+    m >> n   = LiftWM (runWM m P.>> runWM n)
+    fail s   = LiftWM (P.fail s)
+
+data IState :: Maybe [Maybe Nat] -> Maybe [Maybe Nat] -> * -> * where
+  IState :: ([Int] -> IO (a,[Int])) -> IState env env' a
+
+runIState :: IState env env' a -> ([Int] -> IO (a,[Int]))
 runIState (IState f) = f
 
-return :: a -> IState s (Just s) a
-return a = IState $ \s -> (a, s)
+instance IxMonad IState where
+  return a = IState $ \s -> P.return (a,s)
+  v >>= f = IState $ \i -> runIState v i P.>>= \(a,m) -> runIState (f a) m
 
-(>>=) :: IState env0 (Just env1) a -> (a -> IState env1 env2 b) -> IState env0 env2 b
-v >>= f = IState $ \i -> let (a, m) = runIState v i
-                         in runIState (f a) m
-
-(>>) :: IState i (Just m) a -> IState m o b -> IState i o b
-v >> w = v >>= \_ -> w
+liftIO :: IO a -> IState env env a
+liftIO io = IState $ \i -> io P.>>= \a -> P.return (a,i)
 
 wait :: (Inbounds n env ~ True
         ,Index n env ~ Just Z)
-     => SNat n -> IState env (Just (Update n Nothing env)) ()
-wait n = undefined
+     => SNat n -> IState (Just env) (Just (Update n Nothing env)) ()
+wait n = IState $ \i -> putStrLn ("wait "++show (fromSing n)) P.>> P.return ((),i)
 
 close :: (AllNothing env ~ True)
-      => IState env Nothing ()
-close = undefined
+      => IState (Just env) Nothing ()
+close = IState $ \i -> putStrLn "close" P.>> P.return ((),i)
 
 type family VarArgs (n::Nat) (args1::[a]) (args2::[a]) :: * where
-  VarArgs n '[] env = IState env Nothing ()
+  VarArgs n '[] env = IState (Just env) Nothing ()
   VarArgs n (x ': xs) env = SNat n -> VarArgs (S n) xs (env :++ '[ x ])
 
 type Process env = VarArgs Z env '[]
+
+-- Seems like unsafeCoerce should be unneeded
+snatLen :: [a] -> SNat n
+snatLen [] = unsafeCoerce SZ
+snatLen (_:xs) = unsafeCoerce (SS (unsafeCoerce (natLen xs)))
 
 -- TODO Check that l has Just x for each binding
 -- TODO Check for duplicate bindings
 cut :: (AllInbounds l env ~ True)
     => Process (Indices l env)
     -> SList l
-    -> IState env (Just ((Removes l env) :++ '[ Just Z ])) (SNat (NatLen env))
-cut = undefined
+    -> IState (Just env) (Just ((Removes l env) :++ '[ Just Z ])) (SNat (NatLen env))
+cut p cs = IState $ \i -> putStrLn "cut" P.>> P.return (snatLen i,i)
 
 recv :: (Inbounds n env ~ True
         ,Index n env ~ Just (S i))
-     => SNat n -> IState env (Just (Update n (Just i) env)) String
+     => SNat n -> IState (Just env) (Just (Update n (Just i) env)) String
 recv = undefined
 
-t0 :: IState '[] Nothing ()
+-- Apparently, using Process is ambiguous here
+t0 :: IState (Just '[]) Nothing ()
 t0 = close
 
-t1 :: IState '[Just Z] Nothing ()
-t1 = do wait SZ
-        close
+t1 :: Process '[Just Z]
+t1 c = do wait c
+          close
 
-t2 :: IState '[] Nothing ()
+t2 :: IState (Just '[]) Nothing ()
 t2 = do c <- cut t0 SNil
+        liftIO $ putStrLn ("cut in "++show (fromSing c))
         wait c
         close
 
@@ -118,5 +142,6 @@ t3 c = do x <- recv c
 
 t4 :: Process '[Just (S (S Z))]
 t4 c = do d <- cut t3 (SCons SZ SNil)
+          liftIO $ putStrLn ("cut in "++show (fromSing d))
           wait d
           close
