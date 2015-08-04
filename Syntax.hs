@@ -96,6 +96,7 @@ promote [d|
   subst _ (Mu x) = Mu x
   subst x Var = x
   subst x (SendD a s) = SendD a (subst x s)
+  subst x (RecvD a s) = RecvD a (subst x s)
   subst x (External s1 s2) = External (subst x s1) (subst x s2)
   subst x (Internal s1 s2) = Internal (subst x s1) (subst x s2)
 
@@ -113,13 +114,6 @@ promote [d|
 -- 1) Contractive and w/o consecutive Mu's
 -- 2) Closed
 -- 3) Choices have no duplicates
-
--- Helper function that shouldn't need to be defined. This should just be:
--- all2 (RTEq0 ...) cs ds
-type family RTEq3 (hyp::[(Session,Session)]) (cs::[Session]) (ds::[Session])
-  :: Bool where
-  RTEq3 hyp '[] '[] = True
-  RTEq3 hyp (x ': xs) (y ': ys) = RTEq0 hyp x y :&& RTEq3 hyp xs ys
 
 -- Decides s = t (as regular trees). Assumes that (s,t) \notin hyp
 type family RTEq2 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool where
@@ -164,6 +158,16 @@ type family RTEq0 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
 -- Type operator that checks that two session types are equal (as regular trees)
 -- This works by calling the decision proceedure with its initial arguments
 type RTEq s t = RTEq0 '[] s t
+
+type family AllRTEq (ss::[Maybe Session]) (tt::[Maybe Session]) :: Bool
+  where AllRTEq '[] '[] = True
+        AllRTEq (Just s ': ss) (Just t ': tt) = RTEq s t :&& AllRTEq ss tt
+	AllRTEq ss tt = False
+
+type family UnfoldAll (ss::[Maybe Session]) :: [Maybe Session] where
+  UnfoldAll '[] = '[]
+  UnfoldAll (Just s ': ss) = (Just (Unfold s) ': UnfoldAll ss)
+  UnfoldAll (Nothing ': ss) = (Nothing ': UnfoldAll ss)
 
 class IxMonad m where
   return :: a -> m k k a
@@ -284,72 +288,6 @@ cut p cs =
      yield P.>>
      P.return (snatLen bigenv,ExecState (bigenv++[(ar,bw)]) self)
 
-recvdl :: (Inbounds n env ~ True
-        ,Index n env ~ Just u 
-	,Unfold u ~ (SendD a t))
-       => SNat n
-       -> IState (Running env s) 
-                 (Running (Update n (Just t) env) s) a
-recvdl n = IState $ \(ExecState env self) ->
-           taggedRead (index (fromSing n) env) P.>>= \(CData x) ->
-	   P.return ((unsafeCoerce x),ExecState env self)
-
-senddr :: (Unfold u ~ (SendD a s))
-       => a -> IState (Running env u) (Running env s) ()
-senddr x = IState $ \(ExecState env self) ->
-           taggedWrite self (CData x) P.>>
-	   P.return ((),ExecState env self)
-
-sendcr :: (Inbounds n env ~ True
-          ,Index n env ~ Just u
-	  ,RTEq u s ~ True)
-       => SNat n
-       -> IState (Running env (SendC s t))
-                 (Running (Update n Nothing env) t)
-		 ()
-sendcr n = IState $ \(ExecState env self) ->
-           taggedWrite self (CChan (index (fromSing n) env)) P.>>
-	   P.return ((),ExecState env self)
-
-recvcl :: (Inbounds n env ~ True
-          ,Index n env ~ Just u
-	  ,Unfold u ~ (SendC s1 s2))
-       => SNat n
-       -> IState (Running env t)
-	         (Running ((Update n (Just s2) env) :++ '[ Just s1 ]) t)
-                 (SNat (NatLen env))
-recvcl n = IState $ \(ExecState env self) ->
-           taggedRead (index (fromSing n) env) P.>>= \(CChan c) ->
-	   P.return (snatLen env,ExecState (env++[c]) self)
-
-extchoir :: (Unfold u ~ (External s1 s2))
-         => IState (Running env s1) t a
-         -> IState (Running env s2) t a
-	 -> IState (Running env u) t a
-extchoir l r = IState $ \(ExecState env self) ->
-               taggedRead self P.>>= \(CChoice c) ->
-	       case c of
-	         True -> runIState l (ExecState env self)
-		 False -> runIState r (ExecState env self)
-
-extchoil1 :: (Inbounds n env ~ True
-             ,Index n env ~ Just u
-	     ,Unfold u ~ (External s1 s2))
-          => SNat n
-	  -> IState (Running env t) (Running (Update n (Just s1) env) t) ()
-extchoil1 n = IState $ \(ExecState env self) ->
-              taggedWrite (index (fromSing n) env) (CChoice True) P.>>
-	      P.return ((),ExecState env self)
-
-extchoil2 :: (Inbounds n env ~ True
-             ,Index n env ~ Just u
-	     ,Unfold u ~ (External s1 s2))
-          => SNat n
-	  -> IState (Running env t) (Running (Update n (Just s2) env) t) ()
-extchoil2 n = IState $ \(ExecState env self) ->
-              taggedWrite (index (fromSing n) env) (CChoice False) P.>>
-	      P.return ((),ExecState env self)
-
 forward :: (Inbounds n env ~ True
            ,AllButNothing n env ~ True
 	   ,Index n env ~ Just t
@@ -372,6 +310,150 @@ forward n = IState $ \(ExecState env self) ->
 	     COne -> do killThread o P.>> P.return ()
 	     _ -> zombie o (Recv r) (Send w))
 
+
+tailcut :: (NoDups l ~ True
+           ,AllInbounds l env ~ True
+           ,AllJusts l env ~ True
+	   ,RTEq s t ~ True)
+        => Process (Indices l env) t
+        -> SList l
+        -> IState (Running env s) Term () 
+tailcut p cs = 
+  IState $ \(ExecState bigenv self) ->
+  let newenv = (indices (fromSing cs) bigenv)
+  in (runIState (passargs SZ cs (unsafeCoerce p))
+                        (ExecState newenv self))
+
+recvdr :: (Unfold u ~ (RecvD a t))
+       => IState (Running env u) (Running env t) a
+recvdr = IState $ \(ExecState env self) ->
+         taggedRead self P.>>= \(CData x) ->
+	 P.return ((unsafeCoerce x),ExecState env self)
+
+recvdl :: (Inbounds n env ~ True
+        ,Index n env ~ Just u 
+	,Unfold u ~ (SendD a t))
+       => SNat n
+       -> IState (Running env s) 
+                 (Running (Update n (Just t) env) s) a
+recvdl n = IState $ \(ExecState env self) ->
+           taggedRead (index (fromSing n) env) P.>>= \(CData x) ->
+	   P.return ((unsafeCoerce x),ExecState env self)
+
+senddr :: (Unfold u ~ (SendD a s))
+       => a -> IState (Running env u) (Running env s) ()
+senddr x = IState $ \(ExecState env self) ->
+           taggedWrite self (CData x) P.>>
+	   P.return ((),ExecState env self)
+
+senddl :: (Inbounds n env ~ True
+          ,Index n env ~ Just u
+	  ,Unfold u ~ (RecvD a s))
+       => SNat n
+       -> a
+       -> IState (Running env t) (Running (Update n (Just s) env) t) ()
+senddl n x = IState $ \(ExecState env self) ->
+             taggedWrite (index (fromSing n) env) (CData x) P.>>
+	     P.return ((),ExecState env self)
+
+sendcr :: (Inbounds n env ~ True
+          ,Index n env ~ Just u
+	  ,RTEq u s ~ True)
+       => SNat n
+       -> IState (Running env (SendC s t))
+                 (Running (Update n Nothing env) t)
+		 ()
+sendcr n = IState $ \(ExecState env self) ->
+           taggedWrite self (CChan (index (fromSing n) env)) P.>>
+	   P.return ((),ExecState env self)
+
+sendcl :: (Inbounds n env ~ True
+          ,Inbounds c env ~ True
+	  ,Index n env ~ Just u
+	  ,Unfold u ~ (RecvC s1 s2)
+	  ,Index c env ~ Just d
+	  ,RTEq s1 d ~ True)
+       => SNat n
+       -> SNat c
+       -> IState (Running env t)
+                 (Running (Update n (Just s2) (Update n Nothing env)) t)
+		 ()
+sendcl n c =
+  IState $ \(ExecState env self) ->
+  taggedWrite (index (fromSing n) env) (CChan (index (fromSing c) env)) P.>>
+  P.return ((),ExecState env self)
+
+recvcr :: (Unfold u ~ (RecvC s1 s2))
+       => IState (Running env u)
+                 (Running (env :++ '[ Just s1]) s2)
+		 (SNat (NatLen env))
+recvcr = IState $ \(ExecState env self) ->
+         taggedRead self P.>>= \(CChan c) ->
+	 P.return (snatLen env,ExecState (env++[c]) self)
+
+recvcl :: (Inbounds n env ~ True
+          ,Index n env ~ Just u
+	  ,Unfold u ~ (SendC s1 s2))
+       => SNat n
+       -> IState (Running env t)
+	         (Running ((Update n (Just s2) env) :++ '[ Just s1 ]) t)
+                 (SNat (NatLen env))
+recvcl n = IState $ \(ExecState env self) ->
+           taggedRead (index (fromSing n) env) P.>>= \(CChan c) ->
+	   P.return (snatLen env,ExecState (env++[c]) self)
+
+extchoir :: (Unfold u ~ (External s1 s2))
+         => IState (Running env s1) t a
+         -> IState (Running env s2) t a
+	 -> IState (Running env u) t a
+extchoir l r = IState $ \(ExecState env self) ->
+               taggedRead self P.>>= \(CChoice c) ->
+	       case c of
+	         True -> runIState l (ExecState env self)
+		 False -> runIState r (ExecState env self)
+
+extchoil :: (Inbounds n env ~ True
+            ,Index n env ~ Just u
+	    ,Unfold u ~ (Internal s1 s2))
+	  => SNat n
+	  -> IState (Running (Update n (Just s1) env) t) k a
+	  -> IState (Running (Update n (Just s2) env) t) k a
+	  -> IState (Running env t) k a
+extchoil n l r = IState $ \(ExecState env self) ->
+                 taggedRead (index (fromSing n) env) P.>>= \(CChoice c) ->
+		 case c of
+		   True -> runIState l (ExecState env self)
+		   False -> runIState r (ExecState env self)
+
+intchoil1 :: (Inbounds n env ~ True
+             ,Index n env ~ Just u
+	     ,Unfold u ~ (External s1 s2))
+          => SNat n
+	  -> IState (Running env t) (Running (Update n (Just s1) env) t) ()
+intchoil1 n = IState $ \(ExecState env self) ->
+              taggedWrite (index (fromSing n) env) (CChoice True) P.>>
+	      P.return ((),ExecState env self)
+
+intchoil2 :: (Inbounds n env ~ True
+             ,Index n env ~ Just u
+	     ,Unfold u ~ (External s1 s2))
+          => SNat n
+	  -> IState (Running env t) (Running (Update n (Just s2) env) t) ()
+intchoil2 n = IState $ \(ExecState env self) ->
+              taggedWrite (index (fromSing n) env) (CChoice False) P.>>
+	      P.return ((),ExecState env self)
+
+intchoir1 :: (Unfold u ~ (Internal s1 s2))
+          => IState (Running env u) (Running env s1) ()
+intchoir1 = IState $ \(ExecState env self) ->
+            taggedWrite self (CChoice True) P.>>
+	    P.return ((),ExecState env self)
+
+intchoir2 :: (Unfold u ~ (Internal s1 s2))
+          => IState (Running env u) (Running env s2) ()
+intchoir2 = IState $ \(ExecState env self) ->
+            taggedWrite self (CChoice False) P.>>
+	    P.return ((),ExecState env self)
 
 -- Apparently, using Process is ambiguous here
 t0 :: IState (Running '[] One) Term ()
@@ -424,13 +506,13 @@ t8 = do a <- cut t7 SNil
 	wait a
 	close
 
-type Stream a = Mu (External One (SendD a Var))
+type Stream a = (Mu (External One (SendD a Var)))
 
 printstream :: (Show a) => Nat -> Process '[Just (Stream a)] One
-printstream Z c = do extchoil1 c
+printstream Z c = do intchoil1 c
                      wait c
 		     close
-printstream (S n) c = do extchoil2 c
+printstream (S n) c = do intchoil2 c
                          x <- recvdl c
 			 liftIO $ putStrLn ("Got "++show x)
 			 b <- cut (printstream n) (SCons c SNil)
@@ -446,16 +528,16 @@ countup n = extchoir
 
 silter :: (a -> Bool) -> Process '[Just (Stream a)] (Stream a)
 silter f c = extchoir
-               (do extchoil1 c
+               (do intchoil1 c
 	           wait c
 		   close)
-	       (do extchoil2 c
+	       (do intchoil2 c
 	           x <- recvdl c
 		   b <- cut (silter f) (SCons c SNil)
 		   case f x of
 		     True -> do senddr x
 		                forward b
-		     False -> do extchoil2 b
+		     False -> do intchoil2 b
 				 forward b)
 
 natsub :: Nat -> Nat -> Nat
@@ -469,15 +551,14 @@ divisible n m = (n <= m) && (divisible n (natsub m n))
 
 seive :: Process '[Just (Stream Nat)] (Stream Nat)
 seive c = extchoir
-          (do extchoil1 c
+          (do intchoil1 c
 	      wait c
 	      close)
-	  (do extchoil2 c
+	  (do intchoil2 c
 	      x <- recvdl c
 	      senddr x
 	      b <- cut (silter (not . divisible x)) (SCons c SNil)
-	      d <- cut seive (SCons b SNil)
-	      forward d)
+	      tailcut seive (SCons b SNil))
 
 t9 :: Process '[] One
 t9 = do a <- cut (countup (S (S Z))) SNil
@@ -485,3 +566,70 @@ t9 = do a <- cut (countup (S (S Z))) SNil
         c <- cut (printstream (S (S (S (S (S Z)))))) (SCons b SNil)
 	wait c
 	close
+
+type Bag a = (Mu (External (RecvD a Var) (Internal One (SendD a Var))))
+
+empty :: Process '[] (Bag Nat)
+empty = extchoir
+          (do x <- recvdr
+	      tailcut (leaf x) SNil)
+	  (do intchoir1
+	      close)
+
+leaf :: Nat -> Process '[] (Bag Nat)
+leaf x = extchoir
+          (do y <- recvdr
+	      a <- cut (leaf x) SNil
+	      b <- cut (leaf y) SNil
+	      tailcut binary (SCons a (SCons b SNil)))
+	  (do intchoir2
+	      senddr x
+	      tailcut empty SNil)
+
+-- Invariant (size l == size r || size l + 1 == size r) 
+binary :: Process '[Just (Bag Nat), Just (Bag Nat)] (Bag Nat)
+binary l r = extchoir
+               (do x <- recvdr
+	           intchoil1 l
+		   senddl l x
+		   tailcut binary (SCons r (SCons l SNil)))
+               (do intchoil2 r
+		   extchoil r
+		     (do wait r
+		         intchoil2 l
+		         extchoil l
+			   (do wait l
+			       intchoir1
+			       close)
+			   (do x <- recvdl l
+			       intchoir2
+			       senddr x
+			       forward l))
+		     (do x <- recvdl r
+		         intchoir2
+			 senddr x
+			 tailcut binary (SCons r (SCons l SNil))))
+
+fromList :: [Nat] -> Process '[] (Bag Nat)
+fromList [] = empty
+fromList xs = do a <- cut empty SNil
+                 tailcut (fromListGo xs) (SCons a SNil)
+
+fromListGo :: [Nat] -> Process '[Just (Bag Nat)] (Bag Nat)
+fromListGo [] c = forward c
+fromListGo (x:xs) c = do intchoil1 c
+                         senddl c x
+		         tailcut (fromListGo xs) (SCons c SNil)
+
+bagContents :: (Show a) => Process '[Just (Bag a)] One
+bagContents c = do intchoil2 c
+                   extchoil c
+		     (do wait c
+		         close)
+		     (do x <- recvdl c
+		         liftIO $ putStrLn ("Got "++show x)
+			 tailcut bagContents (SCons c SNil))
+
+t10 :: Process '[] One
+t10 = do a <- cut (fromList [Z, S Z, S (S Z), S (S (S Z))]) SNil
+         tailcut bagContents (SCons a SNil)
