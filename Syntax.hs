@@ -90,6 +90,78 @@ promote [d|
     RecvC :: Session -> Session -> Session
     External :: Session -> Session -> Session
     Internal :: Session -> Session -> Session
+    SendShift :: Session -> Session
+    RecvShift :: Session -> Session
+
+  contractive :: Session -> Bool
+  contractive (Mu Var) = False
+  contractive (Mu s) = contractive s
+  contractive Var = True
+  contractive One = True
+  contractive (SendD _ s) = True
+  contractive (RecvD _ s) = True
+  contractive (SendC s1 s2) = True
+  contractive (RecvC s1 s2) = True
+  contractive (External s1 s2) = True
+  contractive (Internal s1 s2) = True
+  contractive (SendShift s) = True
+  contractive (RecvShift s) = True
+
+  isPos0 :: Bool -> Session -> Bool
+  isPos0 _ (Mu s) = isPos s
+  isPos0 p Var = p
+  isPos0 p One = True
+  isPos0 p (SendD _ _) = True
+  isPos0 p (RecvD _ _) = False
+  isPos0 p (SendC _ _) = True
+  isPos0 p (RecvC _ _) = False
+  isPos0 p (External _ _) = False
+  isPos0 p (Internal _ _) = True
+  isPos0 p (SendShift _) = True
+  isPos0 p (RecvShift _) = False
+
+  isPos :: Session -> Bool
+  isPos (Mu s) = isPos s
+  isPos One = True
+  isPos (SendD _ _) = True
+  isPos (RecvD _ _) = False
+  isPos (SendC _ _) = True
+  isPos (RecvC _ _) = False
+  isPos (External _ _) = False
+  isPos (Internal _ _) = True
+  isPos (SendShift _) = True
+  isPos (RecvShift _) = False
+
+  polarityWF0 :: Bool -- Are Var's positive?
+              -> Bool -- Expected Polarity
+              -> Session
+	      -> Bool
+  polarityWF0 v p Var = v == p
+  polarityWF0 _ p (Mu s) = polarityWF0 (isPos s) p s
+  polarityWF0 _ True One = True
+  polarityWF0 v True (SendD _ s) = polarityWF0 v True s
+  polarityWF0 v True (SendC s1 s2) = polarityWF0 v True s1 
+                                  && polarityWF0 v True s2
+  polarityWF0 v True (Internal s1 s2) = polarityWF0 v True s1 
+                                     && polarityWF0 v True s2
+  polarityWF0 v True (SendShift s) = polarityWF0 v False s
+  polarityWF0 v False (RecvD _ s) = polarityWF0 v False s
+  polarityWF0 v False (RecvC s1 s2) = polarityWF0 v True s1 
+                                   && polarityWF0 v False s2
+  polarityWF0 v False (External s1 s2) = polarityWF0 v False s1 
+                                      && polarityWF0 v False s2
+  polarityWF0 v False (RecvShift s) = polarityWF0 v True s
+
+  polarityWF :: Session -> Bool
+  polarityWF s = polarityWF0 undefined (isPos s) s
+
+  wellformed :: Session -> Bool
+  wellformed s = contractive s && polarityWF s
+
+  allWellformed :: [Maybe Session] -> Bool
+  allWellformed [] = True
+  allWellformed (Nothing:xs) = allWellformed xs
+  allWellformed (Just x:xs) = wellformed x && allWellformed xs
 
   subst :: Session -> Session -> Session
   subst _ One = One
@@ -99,6 +171,8 @@ promote [d|
   subst x (RecvD a s) = RecvD a (subst x s)
   subst x (External s1 s2) = External (subst x s1) (subst x s2)
   subst x (Internal s1 s2) = Internal (subst x s1) (subst x s2)
+  subst x (SendShift s) = SendShift (subst x s)
+  subst x (RecvShift s) = RecvShift (subst x s)
 
   unfold :: Session -> Session
   unfold (Mu x) = subst (Mu x) x
@@ -136,6 +210,10 @@ type family RTEq2 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool w
     RTEq0 ('((Internal s1 s2),(Internal t1 t2)) ': hyp) s1 t1
     :&&
     RTEq0 ('((Internal s1 s2),(Internal t1 t2)) ': hyp) s2 t2
+  RTEq2 hyp (SendShift s) (SendShift t) = 
+    RTEq0 ('(SendShift s, SendShift t) ': hyp) s t
+  RTEq2 hyp (RecvShift s) (RecvShift t) = 
+    RTEq0 ('(RecvShift s, RecvShift t) ': hyp) s t
 
 -- Decides  whether two session types, s and t, are equal by first searching for
 -- assumed equalities in ctx and, if none are found, performing the next
@@ -208,6 +286,7 @@ liftIO io = IState $ \i -> io P.>>= \a -> P.return (a,i)
 -- This should be its own module
 data Comms where
   COne :: Comms
+  CShift :: Comms
   CData :: a -> Comms
   CChoice :: Bool -> Comms
   CChan :: BiChan Comms -> Comms
@@ -262,7 +341,8 @@ type family VarArgs (n::Nat) (args1::[a]) (base::b) :: * where
   VarArgs n '[] base = base
   VarArgs n (x ': xs) base = SNat n -> VarArgs (S n) xs base
 
-type Process env s = VarArgs Z env (IState (Running env s) Term ())
+type Process env s = (AllWellformed env ~ True) => 
+   VarArgs Z env (IState (Running env s) Term ())
 
 -- To go with VarArgs we need a way to pass SNats to functions
 passargs :: SNat n -> SList l -> (VarArgs n l base) -> base
@@ -272,7 +352,9 @@ passargs n (SCons _ xs) p = passargs (SS n) xs (p n)
 -- TODO allow for argument channels to vary modulo RTEq
 cut :: (NoDups l ~ True
        ,AllInbounds l env ~ True
-       ,AllJusts l env ~ True)
+       ,AllJusts l env ~ True
+       ,Wellformed t ~ True
+       ,AllWellformed (Indices l env) ~ True)
     => Process (Indices l env) t
     -> SList l
     -> IState (Running env s) 
@@ -314,7 +396,8 @@ forward n = IState $ \(ExecState env self) ->
 tailcut :: (NoDups l ~ True
            ,AllInbounds l env ~ True
            ,AllJusts l env ~ True
-	   ,RTEq s t ~ True)
+	   ,RTEq s t ~ True
+	   ,AllWellformed (Indices l env) ~ True)
         => Process (Indices l env) t
         -> SList l
         -> IState (Running env s) Term () 
@@ -455,6 +538,36 @@ intchoir2 = IState $ \(ExecState env self) ->
             taggedWrite self (CChoice False) P.>>
 	    P.return ((),ExecState env self)
 
+sendsr :: (Unfold u ~ (SendShift s))
+       => IState (Running env u) (Running env s) ()
+sendsr = IState $ \(ExecState env self) ->
+         taggedWrite self CShift P.>>
+	 P.return ((),ExecState env self)
+
+sendsl :: (Inbounds n env ~ True
+          ,Index n env ~ Just u
+	  ,Unfold u ~ RecvShift s)
+       => SNat n
+       -> IState (Running env t) (Running (Update n (Just s) env) t) ()
+sendsl n = IState $ \(ExecState env self) ->
+           taggedWrite (index (fromSing n) env) CShift P.>>
+	   P.return ((),ExecState env self)
+
+recvsr :: (Unfold u ~ (RecvShift s))
+       => IState (Running env u) (Running env s) ()
+recvsr = IState $ \(ExecState env self) ->
+         taggedRead self P.>>= \CShift ->
+	 P.return ((),ExecState env self)
+
+recvsl :: (Inbounds n env ~ True
+          ,Index n env ~ Just u
+	  ,Unfold u ~ SendShift s)
+       => SNat n
+       -> IState (Running env t) (Running (Update n (Just s) env) t) ()
+recvsl n = IState $ \(ExecState env self) ->
+           taggedRead (index (fromSing n) env) P.>>= \CShift ->
+	   P.return ((),ExecState env self)
+
 -- Apparently, using Process is ambiguous here
 t0 :: IState (Running '[] One) Term ()
 t0 = close
@@ -506,14 +619,18 @@ t8 = do a <- cut t7 SNil
 	wait a
 	close
 
-type Stream a = (Mu (External One (SendD a Var)))
+type Stream a = (Mu (External (RecvShift One) 
+                              (RecvShift (SendD a (SendShift Var)))))
 
 printstream :: (Show a) => Nat -> Process '[Just (Stream a)] One
 printstream Z c = do intchoil1 c
+		     sendsl c
                      wait c
 		     close
 printstream (S n) c = do intchoil2 c
+                         sendsl c
                          x <- recvdl c
+			 recvsl c
 			 liftIO $ putStrLn ("Got "++show x)
 			 b <- cut (printstream n) (SCons c SNil)
 			 forward b
@@ -521,23 +638,33 @@ printstream (S n) c = do intchoil2 c
 
 countup :: Nat -> Process '[] (Stream Nat)
 countup n = extchoir 
-              (close)
-              (do senddr n
+              (do recvsr
+	          close)
+              (do recvsr
+	          senddr n
+		  sendsr
 	          a <- cut (countup (S n)) SNil
 	          forward a)
 
 silter :: (a -> Bool) -> Process '[Just (Stream a)] (Stream a)
 silter f c = extchoir
-               (do intchoil1 c
+               (do recvsr
+	           intchoil1 c
+		   sendsl c
 	           wait c
 		   close)
-	       (do intchoil2 c
+	       (do recvsr
+	           intchoil2 c
+		   sendsl c
 	           x <- recvdl c
+		   recvsl c
 		   b <- cut (silter f) (SCons c SNil)
 		   case f x of
 		     True -> do senddr x
+				sendsr
 		                forward b
 		     False -> do intchoil2 b
+		                 sendsl b
 				 forward b)
 
 natsub :: Nat -> Nat -> Nat
@@ -548,15 +675,20 @@ divisible :: Nat -> Nat -> Bool
 divisible n Z = True
 divisible n m = (n <= m) && (divisible n (natsub m n))
                    
-
 seive :: Process '[Just (Stream Nat)] (Stream Nat)
 seive c = extchoir
           (do intchoil1 c
+	      sendsl c
 	      wait c
+	      recvsr
 	      close)
 	  (do intchoil2 c
+	      sendsl c
 	      x <- recvdl c
+	      recvsl c
+	      recvsr
 	      senddr x
+	      sendsr
 	      b <- cut (silter (not . divisible x)) (SCons c SNil)
 	      tailcut seive (SCons b SNil))
 
@@ -567,13 +699,16 @@ t9 = do a <- cut (countup (S (S Z))) SNil
 	wait c
 	close
 
-type Bag a = (Mu (External (RecvD a Var) (Internal One (SendD a Var))))
+type Bag a = (Mu (External (RecvD a Var) 
+                           (RecvShift (Internal One 
+			                        (SendD a (SendShift Var))))))
 
 empty :: Process '[] (Bag Nat)
 empty = extchoir
           (do x <- recvdr
 	      tailcut (leaf x) SNil)
-	  (do intchoir1
+	  (do recvsr
+	      intchoir1
 	      close)
 
 leaf :: Nat -> Process '[] (Bag Nat)
@@ -582,8 +717,10 @@ leaf x = extchoir
 	      a <- cut (leaf x) SNil
 	      b <- cut (leaf y) SNil
 	      tailcut binary (SCons a (SCons b SNil)))
-	  (do intchoir2
+	  (do recvsr
+	      intchoir2
 	      senddr x
+	      sendsr
 	      tailcut empty SNil)
 
 -- Invariant (size l == size r || size l + 1 == size r) 
@@ -594,20 +731,29 @@ binary l r = extchoir
 		   senddl l x
 		   tailcut binary (SCons r (SCons l SNil)))
                (do intchoil2 r
+		   sendsl r
 		   extchoil r
 		     (do wait r
 		         intchoil2 l
+			 sendsl l
 		         extchoil l
 			   (do wait l
+			       recvsr
 			       intchoir1
 			       close)
 			   (do x <- recvdl l
+			       recvsr
 			       intchoir2
 			       senddr x
+			       sendsr
+			       recvsl l
 			       forward l))
 		     (do x <- recvdl r
+		         recvsr
 		         intchoir2
 			 senddr x
+			 sendsr
+			 recvsl r
 			 tailcut binary (SCons r (SCons l SNil))))
 
 fromList :: [Nat] -> Process '[] (Bag Nat)
@@ -623,10 +769,12 @@ fromListGo (x:xs) c = do intchoil1 c
 
 bagContents :: (Show a) => Process '[Just (Bag a)] One
 bagContents c = do intchoil2 c
+                   sendsl c
                    extchoil c
 		     (do wait c
 		         close)
 		     (do x <- recvdl c
+		         recvsl c
 		         liftIO $ putStrLn ("Got "++show x)
 			 tailcut bagContents (SCons c SNil))
 
