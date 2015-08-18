@@ -12,6 +12,7 @@ import Data.Singletons
 import Data.Singletons.Prelude
 import Data.Singletons.TH
 import Data.Singletons.Prelude.List
+import Data.IORef
 
 singletons [d|
   data Nat = Z | S Nat deriving (Show,Eq,Ord)
@@ -290,21 +291,31 @@ data Comms where
   CData :: a -> Comms
   CChoice :: Bool -> Comms
   CChan :: BiChan Comms -> Comms
+  CForward :: Chan Comms -> Comms
 
 data RWTag = RTag | WTag
 
 data TaggedChan :: RWTag -> * -> * where
-  Recv :: Chan a -> TaggedChan RTag a
+  Recv :: IORef (Chan a) -> TaggedChan RTag a
   Send :: Chan a -> TaggedChan WTag a
 
 type BiChan a = (TaggedChan RTag a,TaggedChan WTag a)
 
-taggedRead :: BiChan a -> IO a
-taggedRead (Recv c,Send _) = readChan c
+taggedRead :: BiChan Comms -> IO Comms
+taggedRead (Recv c,Send s) =
+  readIORef c P.>>= \q ->
+  readChan q P.>>= \msg ->
+  case msg of
+    CForward q' ->
+       writeIORef c q' P.>>
+       taggedRead (Recv c, Send s)
+    x -> P.return x
 taggedWrite :: BiChan Comms -> Comms -> IO ()
 taggedWrite (Recv _,Send c) x = writeChan c x
 taggedNew :: IO (BiChan a)
-taggedNew = newChan P.>>= \ch -> P.return (Recv ch,Send ch)
+taggedNew = newChan P.>>= \ch -> 
+            newIORef ch P.>>= \q ->
+            P.return (Recv q,Send ch)
 
 runtop :: Process '[] One -> IO ()
 runtop p = taggedNew P.>>= \(ar,aw) ->
@@ -375,22 +386,13 @@ forward :: (Inbounds n env ~ True
 	   ,Index n env ~ Just t
 	   ,RTEq s t ~ True)
         => SNat n -> IState (Running env s) Term ()
-forward n = IState $ \(ExecState env self) ->
-            let (er,ew) = index (fromSing n) env
-            in myThreadId P.>>= \tid1 ->
-	       forkIO (zombie tid1 (fst self) ew) P.>>= \tid2 ->
-	       zombie tid2 er (snd self) P.>>
-	       P.return ((),ExecState env self)
-  where zombie :: ThreadId
-               -> (TaggedChan RTag Comms)
-	       -> (TaggedChan WTag Comms)
-	       -> IO ()
-	zombie o (Recv r) (Send w) = 
-	   readChan r P.>>= \x ->
-	   writeChan w x P.>> (
-	   case x of
-	     COne -> do killThread o P.>> P.return ()
-	     _ -> zombie o (Recv r) (Send w))
+forward n = IState $ \(ExecState env (Recv sr,Send sw)) ->
+            let (Recv er,Send ew) = index (fromSing n) env
+            in readIORef er P.>>= \erq ->
+               readIORef sr P.>>= \srq ->
+               writeChan sw (CForward erq) P.>>
+               writeChan ew (CForward srq) P.>>
+               P.return ((),ExecState undefined undefined)
 
 
 tailcut :: (NoDups l ~ True
