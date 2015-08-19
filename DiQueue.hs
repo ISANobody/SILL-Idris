@@ -1,12 +1,8 @@
 {-# LANGUAGE DataKinds, GADTs, KindSignatures #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- The implementation is via the normal pair of lists where the writing end is locked
 module DiQueue where
 import Control.Concurrent.STM
-
--- DiQueues have a direction, represented at the type level by the following type. ToX
--- refers to who can read
 
 data Dir = ToC | ToP deriving (Eq, Show)
 
@@ -49,6 +45,6 @@ waitToC = withDir ToC (\_ -> return ())
 waitToP :: DiQueue a -> STM ()
 waitToP = withDir ToP (\_ -> return ())
 
--- TODO Add assertions?
+-- TODO Add assertions? This should only be called when empty
 swapDir :: DiQueue a -> STM ()
 swapDir qr = modifyTVar' (dir qr) invertDir
