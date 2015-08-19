@@ -4,7 +4,7 @@
 -- The implementation is via the normal pair of lists where the writing end is locked
 module DiQueue where
 import Control.Concurrent
-import Data.IORef
+import Control.Concurrent.STM
 
 -- DiQueues have a direction, represented at the type level by the following type. ToX
 -- refers to who can read
@@ -12,60 +12,60 @@ import Data.IORef
 data Dir = ToC | ToP
 
 data DiQueueCore a = DQC { dir :: Dir
-                         , que :: Chan a }
+                         , que :: TChan a }
 
-type DiQueue a = IORef (DiQueueCore a)
+type DiQueue a = TVar (DiQueueCore a)
 
 -- Bool indicates to start pointing at Client or Provider
 newDiQueue :: Bool -> IO (DiQueue a)
-newDiQueue d = do q <- newChan
+newDiQueue d = do q <- newTChanIO
                   if d
-                  then newIORef (DQC ToC q)
-                  else newIORef (DQC ToP q)
+                  then newTVarIO (DQC ToC q)
+                  else newTVarIO (DQC ToP q)
 
-safeReadC :: DiQueue a -> IO a
+safeReadC :: DiQueue a -> STM a
 safeReadC qr =
- do q <- readIORef qr
+ do q <- readTVar qr
     case dir q of
-      ToP -> yield >> safeReadC qr
-      ToC -> readChan (que q)
+      ToP -> retry
+      ToC -> readTChan (que q)
 
-safeReadP :: DiQueue a -> IO a
+safeReadP :: DiQueue a -> STM a
 safeReadP qr =
- do q <- readIORef qr
+ do q <- readTVar qr
     case dir q of
-      ToC -> yield >> safeReadP qr
-      ToP -> readChan (que q)
+      ToC -> retry
+      ToP -> readTChan (que q)
 
-safeWriteC :: DiQueue a -> a -> IO ()
+safeWriteC :: DiQueue a -> a -> STM ()
 safeWriteC qr x = 
-  do q <- readIORef qr
+  do q <- readTVar qr
      case dir q of
-       ToP -> writeChan (que q) x
-       ToC -> yield >> safeWriteC qr x
+       ToP -> writeTChan (que q) x
+       ToC -> retry
 
-safeWriteP :: DiQueue a -> a -> IO ()
+safeWriteP :: DiQueue a -> a -> STM ()
 safeWriteP qr x = 
-  do q <- readIORef qr
+  do q <- readTVar qr
      case dir q of
-       ToC -> writeChan (que q) x
-       ToP -> yield >> safeWriteP qr x
+       ToC -> writeTChan (que q) x
+       ToP -> retry
 
 
-waitToC :: DiQueue a -> IO ()
-waitToC qr = do q <- readIORef qr
+waitToC :: DiQueue a -> STM ()
+waitToC qr = do q <- readTVar qr
                 case dir q of
                   ToC -> return ()
-                  ToP -> yield >> waitToC qr
+                  ToP -> retry
 
-waitToP :: DiQueue a -> IO ()
-waitToP qr = do q <- readIORef qr
+waitToP :: DiQueue a -> STM ()
+waitToP qr = do q <- readTVar qr
                 case dir q of
                   ToP -> return ()
-                  ToC -> yield >> waitToP qr
+                  ToC -> retry
 
 -- TODO Add assertions?
-swapDir :: DiQueue a -> IO ()
-swapDir qr = atomicModifyIORef' qr (\q -> case dir q of
-       ToC -> (q{dir = ToP},())
-       ToP -> (q{dir = ToC},()))
+swapDir :: DiQueue a -> STM ()
+swapDir qr = modifyTVar qr (\q -> case dir q of
+       ToC -> q{dir = ToP}
+       ToP -> q{dir = ToC})

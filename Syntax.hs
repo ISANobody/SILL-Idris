@@ -5,6 +5,7 @@
 {-# LANGUAGE AllowAmbiguousTypes, FlexibleContexts #-}
 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Unsafe.Coerce
 import Prelude hiding ((>>),(>>=),return,fail)
 import qualified Prelude as P
@@ -295,28 +296,28 @@ data Comms where
   CForward :: (DiQueue Comms) -> Comms
 
 myReadP :: IORef (DiQueue Comms) -> IO Comms
-myReadP qr = readIORef qr P.>>= safeReadP P.>>= \x ->
+myReadP qr = readIORef qr P.>>= atomically . safeReadP P.>>= \x ->
              case x of
                CForward q' -> atomicWriteIORef qr q' P.>> myReadP qr
                _ -> P.return x
 
 myReadC :: IORef (DiQueue Comms) -> IO Comms
-myReadC qr = readIORef qr P.>>= safeReadC P.>>= \x ->
+myReadC qr = readIORef qr P.>>= atomically . safeReadC P.>>= \x ->
              case x of
                CForward q' -> atomicWriteIORef qr q' P.>> myReadC qr
                _ -> P.return x
 
 myWriteP :: IORef (DiQueue Comms) -> Comms -> IO ()
-myWriteP qr x = readIORef qr P.>>= \q -> safeWriteP q x
+myWriteP qr x = readIORef qr P.>>= \q -> atomically (safeWriteP q x)
 
 myWriteC :: IORef (DiQueue Comms) -> Comms -> IO ()
-myWriteC qr x = readIORef qr P.>>= \q -> safeWriteC q x
+myWriteC qr x = readIORef qr P.>>= \q -> atomically (safeWriteC q x)
 
 myWaitToReadP :: IORef (DiQueue Comms) -> IO ()
-myWaitToReadP qr = readIORef qr P.>>= waitToP
+myWaitToReadP qr = readIORef qr P.>>= atomically . waitToP
 
 myWaitToReadC :: IORef (DiQueue Comms) -> IO ()
-myWaitToReadC qr = readIORef qr P.>>= waitToC
+myWaitToReadC qr = readIORef qr P.>>= atomically . waitToC
 
 runtop :: Process '[] One -> IO ()
 runtop p = newDiQueue True P.>>= \q ->
@@ -577,7 +578,7 @@ recvsr :: (Unfold u ~ (RecvShift s))
        => IState (Running env u) (Running env s) ()
 recvsr = IState $ \(ExecState env self) ->
          myReadP self P.>>= \CShift ->
-         readIORef self P.>>= swapDir P.>>
+         readIORef self P.>>= atomically . swapDir P.>>
 	 P.return ((),ExecState env self)
 
 recvsl :: (Inbounds n env ~ True
@@ -588,7 +589,7 @@ recvsl :: (Inbounds n env ~ True
 recvsl n = IState $ \(ExecState env self) ->
            let ch = (index (fromSing n) env)
            in myReadC ch P.>>= \CShift ->
-              readIORef ch P.>>= swapDir P.>>
+              readIORef ch P.>>= atomically . swapDir P.>>
 	      P.return ((),ExecState env self)
 
 -- Apparently, using Process is ambiguous here
