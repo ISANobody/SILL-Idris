@@ -10,15 +10,15 @@ import Data.IORef
 -- refers to who can read
 
 data DiQueueCore :: * -> * where
-  ToC :: MVar [a] -> MVar [a] -> DiQueueCore a
-  ToP :: MVar [a] -> MVar [a] -> DiQueueCore a
+  ToC :: IORef [a] -> Chan a -> DiQueueCore a
+  ToP :: IORef [a] -> Chan a -> DiQueueCore a
 
 type DiQueue a = IORef (DiQueueCore a)
 
 -- Bool indicates to start pointing at Client or Provider
 newDiQueue :: Bool -> IO (DiQueue a)
-newDiQueue dir = do h <- newMVar []
-                    t <- newMVar []
+newDiQueue dir = do h <- newIORef []
+                    t <- newChan
                     if dir
                     then newIORef (ToC h t)
                     else newIORef (ToP h t)
@@ -28,14 +28,10 @@ safeReadC qr =
  do q <- readIORef qr
     case q of
       ToP _ _ -> yield >> safeReadC qr
-      ToC h t -> do xss <- takeMVar h
+      ToC h t -> do xss <- readIORef h
                     case xss of
-                      [] -> do ys <- takeMVar t
-                               putMVar t []
-                               putMVar h (reverse ys)
-                               yield
-                               safeReadC qr
-                      (x:xs) -> do putMVar h xs
+                      [] -> readChan t
+                      (x:xs) -> do writeIORef h xs
                                    return x
 
 safeReadP :: DiQueue a -> IO a
@@ -43,30 +39,24 @@ safeReadP qr =
  do q <- readIORef qr
     case q of
       ToC _ _ -> yield >> safeReadP qr
-      ToP h t -> do xss <- takeMVar h
+      ToP h t -> do xss <- readIORef h
                     case xss of
-                      [] -> do ys <- takeMVar t
-                               putMVar t []
-                               putMVar h (reverse ys)
-                               yield
-                               safeReadP qr
-                      (x:xs) -> do putMVar h xs
+                      [] -> do readChan t
+                      (x:xs) -> do writeIORef h xs
                                    return x
 
 safeWriteC :: DiQueue a -> a -> IO ()
 safeWriteC qr x = 
   do q <- readIORef qr
      case q of
-       ToP _ t -> do xs <- takeMVar t
-                     putMVar t (x:xs)
+       ToP _ t -> writeChan t x
        ToC _ _ -> yield >> safeWriteC qr x
 
 safeWriteP :: DiQueue a -> a -> IO ()
 safeWriteP qr x = 
   do q <- readIORef qr
      case q of
-       ToC _ t -> do xs <- takeMVar t
-                     putMVar t (x:xs)
+       ToC _ t -> writeChan t x
        ToP _ _ -> yield >> safeWriteP qr x
 
 
