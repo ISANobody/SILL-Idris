@@ -2,7 +2,7 @@
 {-# LANGUAGE GADTs, DataKinds, KindSignatures, TypeFamilies, TypeOperators #-}
 {-# LANGUAGE TemplateHaskell, QuasiQuotes, PolyKinds, UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables, BangPatterns, Rank2Types #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE AllowAmbiguousTypes, FlexibleContexts #-}
 
 import Control.Concurrent
 import Unsafe.Coerce
@@ -13,6 +13,7 @@ import Data.Singletons.Prelude
 import Data.Singletons.TH
 import Data.Singletons.Prelude.List
 import Data.IORef
+import DiQueue
 
 singletons [d|
   data Nat = Z | S Nat deriving (Show,Eq,Ord)
@@ -266,7 +267,7 @@ instance Prelude.Monad m => IxMonad (WM m) where
     m >> n   = LiftWM (runWM m P.>> runWM n)
     fail s   = LiftWM (P.fail s)
 
-data ExecState = ExecState [BiChan Comms] (BiChan Comms)
+data ExecState = ExecState [IORef (DiQueue Comms)] (IORef (DiQueue Comms))
 
 data IState :: PState -> PState -> * -> * where
   IState :: (ExecState -> IO (a,ExecState)) -> IState env env' a
@@ -290,39 +291,40 @@ data Comms where
   CShift :: Comms
   CData :: a -> Comms
   CChoice :: Bool -> Comms
-  CChan :: BiChan Comms -> Comms
-  CForward :: Chan Comms -> Comms
+  CChan :: (DiQueue Comms) -> Comms
+  CForward :: (DiQueue Comms) -> Comms
 
-data RWTag = RTag | WTag
+myReadP :: IORef (DiQueue Comms) -> IO Comms
+myReadP qr = readIORef qr P.>>= safeReadP P.>>= \x ->
+             case x of
+               CForward q' -> atomicWriteIORef qr q' P.>> myReadP qr
+               _ -> P.return x
 
-data TaggedChan :: RWTag -> * -> * where
-  Recv :: IORef (Chan a) -> TaggedChan RTag a
-  Send :: Chan a -> TaggedChan WTag a
+myReadC :: IORef (DiQueue Comms) -> IO Comms
+myReadC qr = readIORef qr P.>>= safeReadC P.>>= \x ->
+             case x of
+               CForward q' -> atomicWriteIORef qr q' P.>> myReadC qr
+               _ -> P.return x
 
-type BiChan a = (TaggedChan RTag a,TaggedChan WTag a)
+myWriteP :: IORef (DiQueue Comms) -> Comms -> IO ()
+myWriteP qr x = readIORef qr P.>>= \q -> safeWriteP q x
 
-taggedRead :: BiChan Comms -> IO Comms
-taggedRead (Recv c,Send s) =
-  readIORef c P.>>= \q ->
-  readChan q P.>>= \msg ->
-  case msg of
-    CForward q' ->
-       writeIORef c q' P.>>
-       taggedRead (Recv c, Send s)
-    x -> P.return x
-taggedWrite :: BiChan Comms -> Comms -> IO ()
-taggedWrite (Recv _,Send c) x = writeChan c x
-taggedNew :: IO (BiChan a)
-taggedNew = newChan P.>>= \ch -> 
-            newIORef ch P.>>= \q ->
-            P.return (Recv q,Send ch)
+myWriteC :: IORef (DiQueue Comms) -> Comms -> IO ()
+myWriteC qr x = readIORef qr P.>>= \q -> safeWriteC q x
+
+myWaitToReadP :: IORef (DiQueue Comms) -> IO ()
+myWaitToReadP qr = readIORef qr P.>>= waitToP
+
+myWaitToReadC :: IORef (DiQueue Comms) -> IO ()
+myWaitToReadC qr = readIORef qr P.>>= waitToC
 
 runtop :: Process '[] One -> IO ()
-runtop p = taggedNew P.>>= \(ar,aw) ->
-           taggedNew P.>>= \(br,bw) ->
-	   forkIO (execIState p (ExecState [] (br,aw))) P.>>
+runtop p = newDiQueue True P.>>= \q ->
+           newIORef q P.>>= \q1 -> 
+           newIORef q P.>>= \q2 -> 
+	   forkIO (execIState p (ExecState [] q1)) P.>>
 	   yield P.>>
-	   taggedRead (ar,bw) P.>>= \COne ->
+	   myReadC q2 P.>>= \COne ->
 	   putStrLn ("Finished") P.>>
 	   P.return ()
 
@@ -333,14 +335,14 @@ wait :: (Inbounds n env ~ True
      -> IState (Running env s) 
                (Running (Update n Nothing env) s) ()
 wait n = IState $ \(ExecState env self) ->
-         taggedRead (index (fromSing n) env) P.>>= \COne ->
+         myReadC (index (fromSing n) env) P.>>= \COne ->
 	 P.return ((),ExecState env self)
 
 close :: (AllNothing env ~ True
          ,Unfold s ~ One)
       => IState (Running env s) Term ()
 close = IState $ \(ExecState _ self) ->  
-        taggedWrite self COne P.>> 
+        myWriteP self COne P.>> 
 	P.return ((),ExecState [] self)
 
 -- Seems like unsafeCoerce should be unneeded
@@ -361,11 +363,13 @@ passargs _ SNil p = p
 passargs n (SCons _ xs) p = passargs (SS n) xs (p n)
 
 -- TODO allow for argument channels to vary modulo RTEq
-cut :: (NoDups l ~ True
+cut :: forall l env s t .
+       (NoDups l ~ True
        ,AllInbounds l env ~ True
        ,AllJusts l env ~ True
        ,Wellformed t ~ True
-       ,AllWellformed (Indices l env) ~ True)
+       ,AllWellformed (Indices l env) ~ True
+       ,SingI (IsPos t))
     => Process (Indices l env) t
     -> SList l
     -> IState (Running env s) 
@@ -373,26 +377,36 @@ cut :: (NoDups l ~ True
 	      (SNat (NatLen env))
 cut p cs = 
   IState $ \(ExecState bigenv self) ->
-  taggedNew P.>>= \(ar,aw) ->
-  taggedNew P.>>= \(br,bw) ->
+  newDiQueue polarity P.>>= \q ->
+  newIORef q P.>>= \q1 ->
+  newIORef q P.>>= \q2 ->
   let newenv = (indices (fromSing cs) bigenv)
   in forkIO (execIState (passargs SZ cs (unsafeCoerce p))
-                        (ExecState newenv (br,aw))) P.>>
+                        (ExecState newenv q1)) P.>>
      yield P.>>
-     P.return (snatLen bigenv,ExecState (bigenv++[(ar,bw)]) self)
+     P.return (snatLen bigenv,ExecState (bigenv++[q2]) self)
+  where polarity :: Bool
+        polarity = fromSing (sing :: SBool (IsPos t))
 
-forward :: (Inbounds n env ~ True
+forward :: forall env n s t.
+           (Inbounds n env ~ True
            ,AllButNothing n env ~ True
 	   ,Index n env ~ Just t
-	   ,RTEq s t ~ True)
+	   ,RTEq s t ~ True
+           ,SingI (IsPos s))
         => SNat n -> IState (Running env s) Term ()
-forward n = IState $ \(ExecState env (Recv sr,Send sw)) ->
-            let (Recv er,Send ew) = index (fromSing n) env
-            in readIORef er P.>>= \erq ->
-               readIORef sr P.>>= \srq ->
-               writeChan sw (CForward erq) P.>>
-               writeChan ew (CForward srq) P.>>
-               P.return ((),ExecState undefined undefined)
+forward n = IState $ \(ExecState env self) ->
+     case polarity of
+       True -> myWaitToReadC (index (fromSing n) env) P.>>
+               readIORef (index (fromSing n) env) P.>>= \q ->
+               myWriteP self (CForward q) P.>>
+               P.return undefined
+       False -> myWaitToReadP self P.>>
+                readIORef self P.>>= \q ->
+                myWriteC (index (fromSing n) env) (CForward q) P.>>
+                P.return undefined
+  where polarity :: Bool
+        polarity = fromSing (sing :: SBool (IsPos s))
 
 
 tailcut :: (NoDups l ~ True
@@ -412,7 +426,7 @@ tailcut p cs =
 recvdr :: (Unfold u ~ (RecvD a t))
        => IState (Running env u) (Running env t) a
 recvdr = IState $ \(ExecState env self) ->
-         taggedRead self P.>>= \(CData x) ->
+         myReadP self P.>>= \(CData x) ->
 	 P.return ((unsafeCoerce x),ExecState env self)
 
 recvdl :: (Inbounds n env ~ True
@@ -422,13 +436,13 @@ recvdl :: (Inbounds n env ~ True
        -> IState (Running env s) 
                  (Running (Update n (Just t) env) s) a
 recvdl n = IState $ \(ExecState env self) ->
-           taggedRead (index (fromSing n) env) P.>>= \(CData x) ->
+           myReadC (index (fromSing n) env) P.>>= \(CData x) ->
 	   P.return ((unsafeCoerce x),ExecState env self)
 
 senddr :: (Unfold u ~ (SendD a s))
        => a -> IState (Running env u) (Running env s) ()
 senddr x = IState $ \(ExecState env self) ->
-           taggedWrite self (CData x) P.>>
+           myWriteP self (CData x) P.>>
 	   P.return ((),ExecState env self)
 
 senddl :: (Inbounds n env ~ True
@@ -438,7 +452,7 @@ senddl :: (Inbounds n env ~ True
        -> a
        -> IState (Running env t) (Running (Update n (Just s) env) t) ()
 senddl n x = IState $ \(ExecState env self) ->
-             taggedWrite (index (fromSing n) env) (CData x) P.>>
+             myWriteC (index (fromSing n) env) (CData x) P.>>
 	     P.return ((),ExecState env self)
 
 sendcr :: (Inbounds n env ~ True
@@ -449,7 +463,8 @@ sendcr :: (Inbounds n env ~ True
                  (Running (Update n Nothing env) t)
 		 ()
 sendcr n = IState $ \(ExecState env self) ->
-           taggedWrite self (CChan (index (fromSing n) env)) P.>>
+           readIORef (index (fromSing n) env) P.>>= \q ->
+           myWriteP self (CChan q) P.>>
 	   P.return ((),ExecState env self)
 
 sendcl :: (Inbounds n env ~ True
@@ -465,7 +480,8 @@ sendcl :: (Inbounds n env ~ True
 		 ()
 sendcl n c =
   IState $ \(ExecState env self) ->
-  taggedWrite (index (fromSing n) env) (CChan (index (fromSing c) env)) P.>>
+  readIORef (index (fromSing c) env) P.>>= \q ->
+  myWriteC (index (fromSing n) env) (CChan q) P.>>
   P.return ((),ExecState env self)
 
 recvcr :: (Unfold u ~ (RecvC s1 s2))
@@ -473,8 +489,9 @@ recvcr :: (Unfold u ~ (RecvC s1 s2))
                  (Running (env :++ '[ Just s1]) s2)
 		 (SNat (NatLen env))
 recvcr = IState $ \(ExecState env self) ->
-         taggedRead self P.>>= \(CChan c) ->
-	 P.return (snatLen env,ExecState (env++[c]) self)
+         myReadP self P.>>= \(CChan c) ->
+         newIORef c P.>>= \newc -> 
+	 P.return (snatLen env,ExecState (env++[newc]) self)
 
 recvcl :: (Inbounds n env ~ True
           ,Index n env ~ Just u
@@ -484,15 +501,16 @@ recvcl :: (Inbounds n env ~ True
 	         (Running ((Update n (Just s2) env) :++ '[ Just s1 ]) t)
                  (SNat (NatLen env))
 recvcl n = IState $ \(ExecState env self) ->
-           taggedRead (index (fromSing n) env) P.>>= \(CChan c) ->
-	   P.return (snatLen env,ExecState (env++[c]) self)
+           myReadC (index (fromSing n) env) P.>>= \(CChan c) ->
+           newIORef c P.>>= \newc ->
+	   P.return (snatLen env,ExecState (env++[newc]) self)
 
 extchoir :: (Unfold u ~ (External s1 s2))
          => IState (Running env s1) t a
          -> IState (Running env s2) t a
 	 -> IState (Running env u) t a
 extchoir l r = IState $ \(ExecState env self) ->
-               taggedRead self P.>>= \(CChoice c) ->
+               myReadP self P.>>= \(CChoice c) ->
 	       case c of
 	         True -> runIState l (ExecState env self)
 		 False -> runIState r (ExecState env self)
@@ -505,7 +523,7 @@ extchoil :: (Inbounds n env ~ True
 	  -> IState (Running (Update n (Just s2) env) t) k a
 	  -> IState (Running env t) k a
 extchoil n l r = IState $ \(ExecState env self) ->
-                 taggedRead (index (fromSing n) env) P.>>= \(CChoice c) ->
+                 myReadC (index (fromSing n) env) P.>>= \(CChoice c) ->
 		 case c of
 		   True -> runIState l (ExecState env self)
 		   False -> runIState r (ExecState env self)
@@ -516,7 +534,7 @@ intchoil1 :: (Inbounds n env ~ True
           => SNat n
 	  -> IState (Running env t) (Running (Update n (Just s1) env) t) ()
 intchoil1 n = IState $ \(ExecState env self) ->
-              taggedWrite (index (fromSing n) env) (CChoice True) P.>>
+              myWriteC (index (fromSing n) env) (CChoice True) P.>>
 	      P.return ((),ExecState env self)
 
 intchoil2 :: (Inbounds n env ~ True
@@ -525,25 +543,25 @@ intchoil2 :: (Inbounds n env ~ True
           => SNat n
 	  -> IState (Running env t) (Running (Update n (Just s2) env) t) ()
 intchoil2 n = IState $ \(ExecState env self) ->
-              taggedWrite (index (fromSing n) env) (CChoice False) P.>>
+              myWriteC (index (fromSing n) env) (CChoice False) P.>>
 	      P.return ((),ExecState env self)
 
 intchoir1 :: (Unfold u ~ (Internal s1 s2))
           => IState (Running env u) (Running env s1) ()
 intchoir1 = IState $ \(ExecState env self) ->
-            taggedWrite self (CChoice True) P.>>
+            myWriteP self (CChoice True) P.>>
 	    P.return ((),ExecState env self)
 
 intchoir2 :: (Unfold u ~ (Internal s1 s2))
           => IState (Running env u) (Running env s2) ()
 intchoir2 = IState $ \(ExecState env self) ->
-            taggedWrite self (CChoice False) P.>>
+            myWriteP self (CChoice False) P.>>
 	    P.return ((),ExecState env self)
 
 sendsr :: (Unfold u ~ (SendShift s))
        => IState (Running env u) (Running env s) ()
 sendsr = IState $ \(ExecState env self) ->
-         taggedWrite self CShift P.>>
+         myWriteP self CShift P.>>
 	 P.return ((),ExecState env self)
 
 sendsl :: (Inbounds n env ~ True
@@ -552,13 +570,14 @@ sendsl :: (Inbounds n env ~ True
        => SNat n
        -> IState (Running env t) (Running (Update n (Just s) env) t) ()
 sendsl n = IState $ \(ExecState env self) ->
-           taggedWrite (index (fromSing n) env) CShift P.>>
+           myWriteC (index (fromSing n) env) CShift P.>>
 	   P.return ((),ExecState env self)
 
 recvsr :: (Unfold u ~ (RecvShift s))
        => IState (Running env u) (Running env s) ()
 recvsr = IState $ \(ExecState env self) ->
-         taggedRead self P.>>= \CShift ->
+         myReadP self P.>>= \CShift ->
+         readIORef self P.>>= swapDir P.>>
 	 P.return ((),ExecState env self)
 
 recvsl :: (Inbounds n env ~ True
@@ -567,8 +586,10 @@ recvsl :: (Inbounds n env ~ True
        => SNat n
        -> IState (Running env t) (Running (Update n (Just s) env) t) ()
 recvsl n = IState $ \(ExecState env self) ->
-           taggedRead (index (fromSing n) env) P.>>= \CShift ->
-	   P.return ((),ExecState env self)
+           let ch = (index (fromSing n) env)
+           in myReadC ch P.>>= \CShift ->
+              readIORef ch P.>>= swapDir P.>>
+	      P.return ((),ExecState env self)
 
 -- Apparently, using Process is ambiguous here
 t0 :: IState (Running '[] One) Term ()
