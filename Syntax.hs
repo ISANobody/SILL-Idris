@@ -20,11 +20,16 @@ singletons [d|
   data Nat = Z | S Nat deriving (Show,Eq,Ord)
   |]
 
+natToInt :: Nat -> Int
+natToInt Z = 0
+natToInt (S n) = 1 + (natToInt n)
+
 promote [d|
   maxNat :: Nat -> Nat -> Nat
   maxNat Z n = n
   maxNat n Z = n
   maxNat (S n) (S m) = S (maxNat n m)
+
   
   inbounds :: Nat -> [a] -> Bool
   inbounds Z [] = False
@@ -349,7 +354,7 @@ instance Prelude.Monad m => IxMonad (WM m) where
     m >> n   = LiftWM (runWM m P.>> runWM n)
     fail s   = LiftWM (P.fail s)
 
-data ExecState = ExecState [IORef (DiQueue Comms)] (IORef (DiQueue Comms))
+data ExecState = ExecState [IORef (ExtDiQueue Comms)] (IORef (ExtDiQueue Comms))
 
 data IState :: PState -> PState -> * -> * where
   IState :: (ExecState -> IO (a,ExecState)) -> IState env env' a
@@ -373,37 +378,37 @@ data Comms where
   CShift :: Comms
   CData :: a -> Comms
   CChoice :: Bool -> Comms
-  CChan :: (DiQueue Comms) -> Comms
-  CForward :: (DiQueue Comms) -> Comms
+  CChan :: (ExtDiQueue Comms) -> Comms
+  CForward :: (ExtDiQueue Comms) -> Comms
 
-myReadP :: IORef (DiQueue Comms) -> IO Comms
+myReadP :: IORef (ExtDiQueue Comms) -> IO Comms
 myReadP qr = readIORef qr P.>>= atomically . safeReadP P.>>= \x ->
              case x of
                CForward q' -> atomicWriteIORef qr q' P.>> myReadP qr
                _ -> P.return x
 
-myReadC :: IORef (DiQueue Comms) -> IO Comms
+myReadC :: IORef (ExtDiQueue Comms) -> IO Comms
 myReadC qr = readIORef qr P.>>= atomically . safeReadC P.>>= \x ->
              case x of
                CForward q' -> atomicWriteIORef qr q' P.>> myReadC qr
                _ -> P.return x
 
-myWriteP :: IORef (DiQueue Comms) -> Comms -> IO ()
+myWriteP :: DiQueue q => IORef (q Comms) -> Comms -> IO ()
 myWriteP qr x = readIORef qr P.>>= \q -> atomically (safeWriteP q x)
 
-myWriteC :: IORef (DiQueue Comms) -> Comms -> IO ()
+myWriteC :: DiQueue q => IORef (q Comms) -> Comms -> IO ()
 myWriteC qr x = readIORef qr P.>>= \q -> atomically (safeWriteC q x)
 
-myWaitToReadP :: IORef (DiQueue Comms) -> IO ()
+myWaitToReadP :: DiQueue q => IORef (q Comms) -> IO ()
 myWaitToReadP qr = readIORef qr P.>>= atomically . waitToP
 
-myWaitToReadC :: IORef (DiQueue Comms) -> IO ()
+myWaitToReadC :: DiQueue q => IORef (q Comms) -> IO ()
 myWaitToReadC qr = readIORef qr P.>>= atomically . waitToC
 
 runtop :: Process '[] One -> IO ()
-runtop p = newDiQueue True P.>>= \q ->
-           newIORef q P.>>= \q1 -> 
-           newIORef q P.>>= \q2 -> 
+runtop p = newBDiQueue True 1 P.>>= \q ->
+           newIORef (ExtDiQueue q) P.>>= \q1 -> 
+           newIORef (ExtDiQueue q) P.>>= \q2 -> 
 	   forkIO (execIState p (ExecState [] q1)) P.>>
 	   yield P.>>
 	   myReadC q2 P.>>= \COne ->
@@ -460,7 +465,9 @@ cut :: forall l env s t .
 	      (SNat (NatLen env))
 cut p cs = 
   IState $ \(ExecState bigenv self) ->
-  newDiQueue polarity P.>>= \q ->
+  (case bounds of
+     Nothing -> newUDiQueueE polarity
+     Just n -> newBDiQueueE polarity (natToInt n)) P.>>= \q ->
   newIORef q P.>>= \q1 ->
   newIORef q P.>>= \q2 ->
   let newenv = (indices (fromSing cs) bigenv)
