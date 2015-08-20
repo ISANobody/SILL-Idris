@@ -21,6 +21,11 @@ singletons [d|
   |]
 
 promote [d|
+  maxNat :: Nat -> Nat -> Nat
+  maxNat Z n = n
+  maxNat n Z = n
+  maxNat (S n) (S m) = S (maxNat n m)
+  
   inbounds :: Nat -> [a] -> Bool
   inbounds Z [] = False
   inbounds Z _ = True
@@ -240,15 +245,91 @@ type family RTEq0 (hyp::[(Session,Session)]) (s::Session) (t::Session) :: Bool
 -- This works by calling the decision proceedure with its initial arguments
 type RTEq s t = RTEq0 '[] s t
 
-type family AllRTEq (ss::[Maybe Session]) (tt::[Maybe Session]) :: Bool
-  where AllRTEq '[] '[] = True
-        AllRTEq (Just s ': ss) (Just t ': tt) = RTEq s t :&& AllRTEq ss tt
-	AllRTEq ss tt = False
+-- Computes the local session bounds for a type (i.e., the maximum distance from the
+-- current point to the farthest polarity shift).
+-- This takes a cache of previously visited nodes to protect against loop
+-- and returns Nothing if no bound can be found
+type family LocalBounds0 (ctx::[Session]) (loop :: [Session]) (s::Session) 
+  :: Maybe Nat where
+  LocalBounds0 (s ': ctx) loop s = Nothing
+  LocalBounds0 (t ': ctx) loop s = LocalBounds0 ctx loop s
+  LocalBounds0 '[] loop s = LocalBounds1 loop s
 
-type family UnfoldAll (ss::[Maybe Session]) :: [Maybe Session] where
-  UnfoldAll '[] = '[]
-  UnfoldAll (Just s ': ss) = (Just (Unfold s) ': UnfoldAll ss)
-  UnfoldAll (Nothing ': ss) = (Nothing ': UnfoldAll ss)
+type family MaybeSucc (m::Maybe Nat) :: Maybe Nat where
+  MaybeSucc Nothing = Nothing
+  MaybeSucc (Just a) = Just (S a)
+
+-- liftM2 max
+type family MaybeMax (m::Maybe Nat) (n::Maybe Nat) :: Maybe Nat where
+  MaybeMax Nothing n = Nothing
+  MaybeMax m Nothing = Nothing
+  MaybeMax (Just m) (Just n) = Just (MaxNat m n)
+
+type family LocalBounds1 (loop :: [Session]) (s::Session) :: Maybe Nat where
+  LocalBounds1 loop (Mu s) = LocalBounds1 loop (Unfold (Mu s))
+  LocalBounds1 loop One = Just (S Z)
+  LocalBounds1 loop (SendShift s) = Just (S Z)
+  LocalBounds1 loop (RecvShift s) = Just (S Z)
+  LocalBounds1 loop (SendD a s) = 
+     MaybeSucc (LocalBounds0 (SendD a s ': loop) (SendD a s ': loop) s)
+  LocalBounds1 loop (RecvD a s) = 
+     MaybeSucc (LocalBounds0 (RecvD a s ': loop) (RecvD a s ': loop) s)
+  LocalBounds1 loop (SendC a s) = 
+     MaybeSucc (LocalBounds0 (SendC a s ': loop) (SendC a s ': loop) s)
+  LocalBounds1 loop (RecvC a s) = 
+     MaybeSucc (LocalBounds0 (RecvC a s ': loop) (RecvC a s ': loop) s)
+  LocalBounds1 loop (External s t) = 
+     MaybeMax (LocalBounds0 (External s t ': loop) (External s t ': loop) s)
+              (LocalBounds0 (External s t ': loop) (External s t ': loop) t)
+  LocalBounds1 loop (Internal s t) = 
+     MaybeMax (LocalBounds0 (Internal s t ': loop) (Internal s t ': loop) s)
+              (LocalBounds0 (Internal s t ': loop) (Internal s t ': loop) t)
+
+type LocalBounds s = LocalBounds0 '[] '[] s
+
+
+type family PhaseStarts0 (ctx::[Session]) (visited::[Session]) (s::Session) 
+  :: [Session] where
+  PhaseStarts0 (s ': ctx) visited s = '[]
+  PhaseStarts0 (t ': ctx) visited s = PhaseStarts0 ctx visited s
+  PhaseStarts0 '[] visited s = PhaseStarts1 visited s
+
+type family PhaseStarts1 (visited::[Session]) (s::Session) :: [Session] where
+  PhaseStarts1 visited (Mu s) = PhaseStarts1 visited (Unfold (Mu s))
+  PhaseStarts1 visited One = '[]
+  PhaseStarts1 visited (SendShift s) = s ': (PhaseStarts0 (SendShift s ': visited)
+                                                          (SendShift s ': visited) s)
+  PhaseStarts1 visited (RecvShift s) = s ': (PhaseStarts0 (RecvShift s ': visited)
+                                                          (RecvShift s ': visited) s)
+  PhaseStarts1 visited (SendD a s) = PhaseStarts0 (SendD a s ': visited)
+                                                  (SendD a s ': visited) s
+  PhaseStarts1 visited (RecvD a s) = PhaseStarts0 (RecvD a s ': visited)
+                                                  (RecvD a s ': visited) s
+  PhaseStarts1 visited (SendC s t) = PhaseStarts0 (SendC s t ': visited)
+                                                  (SendC s t ': visited) t
+  PhaseStarts1 visited (RecvC s t) = PhaseStarts0 (RecvC s t ': visited)
+                                                  (RecvC s t ': visited) t
+  PhaseStarts1 visited (External s t) = PhaseStarts0 (External s t ': visited)
+                                                     (External s t ': visited) s
+                                    :++ PhaseStarts0 (External s t ': visited)
+                                                     (External s t ': visited) t
+  PhaseStarts1 visited (Internal s t) = PhaseStarts0 (Internal s t ': visited)
+                                                     (Internal s t ': visited) s
+                                    :++ PhaseStarts0 (Internal s t ': visited)
+                                                     (Internal s t ': visited) t
+
+-- Compute the starts of phases.
+type PhaseStarts s = s ': (PhaseStarts1 '[] s)
+
+type family MaybeMaximum (ns::[Maybe Nat]) :: Maybe Nat where
+  MaybeMaximum '[ n ] = n
+  MaybeMaximum (n ': ns) = MaybeMax n (MaybeMaximum ns)
+
+type family GlobalBounds0 (ss::[Session]) :: [Maybe Nat] where
+  GlobalBounds0 '[] = '[]
+  GlobalBounds0 (s ': ss) = LocalBounds s ': GlobalBounds0 ss
+
+type GlobalBounds s = MaybeMaximum (GlobalBounds0 (PhaseStarts s))
 
 class IxMonad m where
   return :: a -> m k k a
@@ -370,7 +451,8 @@ cut :: forall l env s t .
        ,AllJusts l env ~ True
        ,Wellformed t ~ True
        ,AllWellformed (Indices l env) ~ True
-       ,SingI (IsPos t))
+       ,SingI (IsPos t)
+       ,SingI (GlobalBounds t))
     => Process (Indices l env) t
     -> SList l
     -> IState (Running env s) 
@@ -388,6 +470,8 @@ cut p cs =
      P.return (snatLen bigenv,ExecState (bigenv++[q2]) self)
   where polarity :: Bool
         polarity = fromSing (sing :: SBool (IsPos t))
+        bounds :: Maybe Nat
+        bounds = fromSing (sing :: SMaybe (GlobalBounds t))
 
 forward :: forall env n s t.
            (Inbounds n env ~ True
