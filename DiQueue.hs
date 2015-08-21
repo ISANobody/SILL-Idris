@@ -3,8 +3,8 @@
 
 module DiQueue where
 import Control.Concurrent.STM
-import Numeric.Natural
 import Data.Array.IArray
+import Data.Array.Base
 
 data Dir = ToC | ToP deriving (Eq, Show)
 
@@ -65,12 +65,12 @@ instance DiQueue UDiQueue where
 -- This is probably slower than the unbounded implementation but lets us show off type
 -- directed optimizations
 data BDiQueue a = BDQ { dirB :: TVar Dir
-                      , readPos :: TVar Natural
-                      , writePos :: TVar Natural
-                      , queB :: Array Natural (TMVar a) }
+                      , readPos :: TVar Int
+                      , writePos :: TVar Int
+                      , queB :: Array Int (TMVar a) }
 
 -- Wait until the queue is pointing the specified direction and then modify the Chan
-withDirB :: Dir -> (TVar Natural -> TVar Natural -> Array Natural (TMVar a) -> STM b) 
+withDirB :: Dir -> (TVar Int -> TVar Int -> Array Int (TMVar a) -> STM b) 
          -> BDiQueue a -> STM b
 withDirB d f q = do qd <- readTVar (dirB q)
                     if d == qd 
@@ -79,11 +79,11 @@ withDirB d f q = do qd <- readTVar (dirB q)
 
 -- Bool indicates to start pointing at Client or Provider
 newBDiQueue :: Bool -> Int -> IO (BDiQueue a)
-newBDiQueue b i = do q <- mapM (\_ -> newEmptyTMVarIO)  [1..i]
-                     rp <- newTVarIO 1
-                     wp <- newTVarIO 1
+newBDiQueue b i = do q <- mapM (\_ -> newEmptyTMVarIO)  [0..i-1]
+                     rp <- newTVarIO 0
+                     wp <- newTVarIO 0
                      d <- newTVarIO (if b then ToC else ToP)
-                     return (BDQ d rp wp (listArray (1,fromIntegral i) q))
+                     return (BDQ d rp wp (listArray (0,i-1) q))
 
 newBDiQueueE :: Bool -> Int -> IO (ExtDiQueue a)
 newBDiQueueE b i = do q <- newBDiQueue b i
@@ -92,18 +92,18 @@ newBDiQueueE b i = do q <- newBDiQueue b i
 instance DiQueue BDiQueue where
   safeReadC = withDirB ToC (\rp _ q -> do i <- readTVar rp
                                           writeTVar rp (i+1)
-                                          takeTMVar (q!i))
+                                          takeTMVar (unsafeAt q i))
   safeReadP = withDirB ToP (\rp _ q -> do i <- readTVar rp
                                           writeTVar rp (i+1)
-                                          takeTMVar (q!i))
+                                          takeTMVar (unsafeAt q i))
   safeWriteC qr x = withDirB ToP (\_ wp q -> do i <- readTVar wp
                                                 writeTVar wp (i+1)
-                                                putTMVar (q!i) x) qr
+                                                putTMVar (unsafeAt q i) x) qr
   safeWriteP qr x = withDirB ToC (\_ wp q -> do i <- readTVar wp
                                                 writeTVar wp (i+1)
-                                                putTMVar (q!i) x) qr
+                                                putTMVar (unsafeAt q i) x) qr
   waitToC = withDirB ToC (\_ _ _ -> return ())
   waitToP = withDirB ToP (\_ _ _ -> return ())
   swapDir qr = do modifyTVar' (dirB qr) invertDir
-                  writeTVar (readPos qr) 1
-                  writeTVar (writePos qr) 1
+                  writeTVar (readPos qr) 0
+                  writeTVar (writePos qr) 0
