@@ -356,11 +356,8 @@ instance Prelude.Monad m => IxMonad (WM m) where
 
 data ExecState = ExecState [IORef (ExtDiQueue Comms)] (IORef (ExtDiQueue Comms))
 
-data IState :: PState -> PState -> * -> * where
-  IState :: (ExecState -> IO (a,ExecState)) -> IState env env' a
-
-runIState :: IState env env' a -> (ExecState -> IO (a,ExecState))
-runIState (IState f) = f
+newtype IState (k1::PState) (k2::PState) a 
+   = IState { runIState :: (ExecState -> IO (a,ExecState)) }
 
 execIState :: IState (Running env s) Term () -> (ExecState -> IO ())
 execIState (IState f) ex = f ex P.>> P.return ()
